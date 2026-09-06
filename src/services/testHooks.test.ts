@@ -38,6 +38,17 @@ import {
   FALLBACK_SESSION_LANE_WIDTH,
   _resetSessionLaneWidth,
 } from '../multitrack/sessionViewport';
+import { MIN_CLUSTER_SIZE, SEG_SHIFT, SEG_WINDOW } from '../dsp/diarization';
+import { cancelDiarization } from './diarizeService';
+import {
+  classWindow,
+  installDiarizeBackend,
+  speakerVector,
+  uninstallDiarizeBackend,
+  WIRE_MODEL_BYTES,
+  WIRE_WINDOW_FRAMES,
+  type DiarizeBackend,
+} from '../__mocks__/diarizeBackend';
 
 function api(): TestApi {
   installTestHooks();
@@ -1313,5 +1324,374 @@ describe('getPlaybackState (D2)', () => {
       positionSample: 0,
       cursorSample: 0,
     });
+  });
+});
+
+/**
+ * D6 — `separateSpeakersLand`, the Separate Speakers landing WITHOUT either
+ * model.
+ *
+ * Same bargain as `separateVoiceLand` above, one stage further along: the smoke
+ * cannot run HT-Demucs AND the two diarization models (198 MB, minutes of CPU)
+ * to watch three tracks land. So the hook synthesises BOTH halves — the exact
+ * four-stem partition of the active document, and the evidence a diarization
+ * host would have produced for two speakers taking strict turns across it — and
+ * hands them to the shipped `assembleDiarization` -> `segmentsToDocSamples` ->
+ * `landSpeakers` chain. What is asserted here is therefore that chain, which is
+ * the part D4 added, plus the hook's own JSON contract.
+ */
+describe('separateSpeakersLand (D4/D6)', () => {
+  /** 16 kHz samples a document of `seconds` at 44.1 kHz resamples to — the rate
+   *  pair divides exactly (44100 / 16000 = 2.75625), so no rounding argument is
+   *  needed to say which windows the fixture produces. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  /** Distinct, non-trivial content per channel, as `addVoiceDoc` above: a
+   *  landing measured on silence would pass with the mask inverted. */
+  function addSpeakerDoc(name = 'talk.wav', samples = 2 * 44100, channelCount = 2): AudioDocument {
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const ch = new Float32Array(samples);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = 0.4 * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) + (c === 0 ? 0.05 : -0.03);
+      }
+      channels.push(ch);
+    }
+    const doc = createDocument({ name, sampleRate: 44100, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('lands Speaker 1, Speaker 2 and Backing at a forced count of two', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.ok).toBe(true);
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.requestedSpeakerCount).toBe(2);
+    expect(summary.documentNames).toEqual([
+      'talk.wav — Speaker 1',
+      'talk.wav — Speaker 2',
+      'talk.wav — Backing',
+    ]);
+    expect(summary.trackNames).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+    expect(summary.sessionName).toBe('talk.wav — Speakers');
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(2 * 44100);
+    expect(useSessionStore.getState().session.tracks).toHaveLength(3);
+    expect(useAppStore.getState().view).toBe('multitrack');
+    // D4: a speaker split is not a partition of the source, so the landing
+    // makes no exact-sum claim in either direction.
+    expect(summary.exactSumHolds).toBeNull();
+  });
+
+  it('a forced count of ONE is the Voice + Backing landing, not a one-speaker mask', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(1);
+
+    expect(summary.speakerCount).toBe(1);
+    expect(summary.documentNames).toEqual(['talk.wav — Voice', 'talk.wav — Backing']);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+    expect(summary.sessionName).toBe('talk.wav — Voice + Backing');
+    // Nothing was masked, so there is no "outside the spans" to measure — and
+    // `landVoice`'s own exact-sum verdict is a real one, not D4's "no claim".
+    expect(summary.outsideSpansPeak).toBeNull();
+    expect(summary.speakerPeaks).toEqual([]);
+  });
+
+  it('every speaker document is silent outside that speakers turns and carries audio inside them', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(2);
+
+    // The two halves of the mask, and both are needed: a landing that zeroed
+    // the WHOLE document would also report 0 outside the spans.
+    expect(summary.outsideSpansPeak).toBe(0);
+    expect(summary.speakerPeaks).toHaveLength(2);
+    for (const peak of summary.speakerPeaks) expect(peak).toBeGreaterThan(0);
+    // Turns, not one span each: the fixture alternates, so the first speaker
+    // gets two turns and the second one.
+    expect(summary.segmentCounts).toEqual([2, 1]);
+    expect(summary.speechSeconds).toHaveLength(2);
+    for (const s of summary.speechSeconds) expect(s).toBeGreaterThan(0);
+  });
+
+  it('routes a MONO source as dual-mono across every landed track, and says so', () => {
+    const t = api();
+    addSpeakerDoc('mono.wav', 2 * 44100, 1);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.monoRoutedAsDualMono).toBe(true);
+    expect(summary.channelCounts).toEqual([2, 2, 2]);
+  });
+
+  it('the auto policy keeps both voices once each has MIN_CLUSTER_SIZE fragments', () => {
+    const t = api();
+    // Four windows -> four fragments per voice, exactly MIN_CLUSTER_SIZE: the
+    // boundary value itself, which `foldSmallClusters` keeps.
+    addSpeakerDoc('long.wav', docSamplesForWindows(MIN_CLUSTER_SIZE));
+
+    const summary = t.separateSpeakersLand();
+
+    expect(summary.requestedSpeakerCount).toBeNull();
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.trackNames).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+  });
+
+  it('...and folds them into one below it, which lands as Voice + Backing', () => {
+    const t = api();
+    // One step past the boundary: three windows, three fragments per voice.
+    // Every cluster is then small, so the measured fold (D3, MIN_CLUSTER_SIZE
+    // fixed at 4) collapses them into the largest — the honest auto answer on
+    // this much audio, not a fixture accident.
+    addSpeakerDoc('short.wav', docSamplesForWindows(MIN_CLUSTER_SIZE - 1));
+
+    const summary = t.separateSpeakersLand();
+
+    expect(summary.speakerCount).toBe(1);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+  });
+
+  it('refuses an empty document and a bare app, landing nothing', () => {
+    const t = api();
+    expect(t.separateSpeakersLand(2).ok).toBe(false);
+
+    const empty = createDocument({ name: 'empty.wav', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.ok).toBe(false);
+    expect(summary.documentNames).toEqual([]);
+    expect(summary.trackNames).toEqual([]);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  it('hands back plain JSON (T16)', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+    expectPlainJson(t.separateSpeakersLand(2));
+    expectPlainJson(t.separateSpeakersLand(1));
+  });
+});
+
+/**
+ * D6 — the two hooks that face the REAL diarization host: the model probe the
+ * smoke gates on, and the run itself.
+ *
+ * Driven here through `src/__mocks__/diarizeBackend`, the shared double for the
+ * `diarize:*` preload surface, so what is exercised is the whole renderer path
+ * — `diarizeChannels` resampling the ACTIVE document, accumulating the host's
+ * windows and fragments, and assembling them — with only the utility process
+ * replaced. The hook's own job is the last step of that: flattening a result
+ * carrying `Uint8Array` windows and `Float32Array` vectors into scalars that
+ * survive Playwright's structured-clone boundary (T16).
+ */
+describe('getDiarizeModelState / diarizeActive (D6)', () => {
+  let backend: DiarizeBackend;
+
+  beforeEach(() => {
+    backend = installDiarizeBackend();
+  });
+
+  afterEach(async () => {
+    // Never leave a run reserved for the next test.
+    await cancelDiarization();
+    uninstallDiarizeBackend();
+  });
+
+  /** Spins the microtask queue until `pred` holds (or the budget runs out), so
+   *  a test can wait for the invoke without guessing a tick count. */
+  async function flushUntil(pred: () => boolean, ticks = 200): Promise<void> {
+    for (let i = 0; i < ticks && !pred(); i++) await Promise.resolve();
+  }
+
+  /** Document samples at 44.1 kHz that resample to exactly `windows`
+   *  segmentation windows — the rate pair divides exactly (44100 / 16000 =
+   *  2.75625), so the fixture needs no rounding argument. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  function addStemDoc(name: string, samples: number): AudioDocument {
+    const channels = [0, 1].map((c) => {
+      const ch = new Float32Array(samples);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = 0.4 * Math.sin((2 * Math.PI * (140 + 60 * c) * i) / 44100) + (c === 0 ? 0.04 : -0.02);
+      }
+      return ch;
+    });
+    const doc = createDocument({ name, sampleRate: 44100, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  /** One window with the three local slots on three frame ranges — the
+   *  overlap-free shape `diarizeService.test.ts` derives its segments from. */
+  function fixtureWindow(): Uint8Array {
+    return classWindow([
+      { from: 0, to: 200, class: 1 },
+      { from: 200, to: 400, class: 2 },
+      { from: 400, to: WIRE_WINDOW_FRAMES, class: 3 },
+    ]);
+  }
+
+  /** Voice A holds slot 0 in every window plus slot 2 of window 0 (four
+   *  fragments); voice B holds slot 1 everywhere plus slot 2 of windows 1 and 2
+   *  (five). Both at or above MIN_CLUSTER_SIZE, which is what stops the auto
+   *  fold collapsing them into one. */
+  const AXES: { windowIndex: number; localSpeaker: number; axis: number }[] = [
+    { windowIndex: 0, localSpeaker: 0, axis: 0 },
+    { windowIndex: 0, localSpeaker: 1, axis: 1 },
+    { windowIndex: 0, localSpeaker: 2, axis: 0 },
+    { windowIndex: 1, localSpeaker: 0, axis: 0 },
+    { windowIndex: 1, localSpeaker: 1, axis: 1 },
+    { windowIndex: 1, localSpeaker: 2, axis: 1 },
+    { windowIndex: 2, localSpeaker: 0, axis: 0 },
+    { windowIndex: 2, localSpeaker: 1, axis: 1 },
+    { windowIndex: 2, localSpeaker: 2, axis: 1 },
+  ];
+  const ACTIVE_FRAMES = [200, 200, WIRE_WINDOW_FRAMES - 400];
+
+  /** Streams `windowCount` windows and the fragments belonging to them, with
+   *  the host's own progress for both stages, then settles the invoke. */
+  function streamFixture(windowCount: number): void {
+    for (let i = 0; i < windowCount; i++) {
+      backend.emit.progress({ stage: 'segment', done: i + 1, total: windowCount });
+      backend.emit.window({ index: i, labels: fixtureWindow() });
+    }
+    const fragments = AXES.filter((f) => f.windowIndex < windowCount);
+    fragments.forEach((f, k) => {
+      backend.emit.progress({ stage: 'embed', done: k + 1, total: fragments.length });
+      backend.emit.embedding({
+        windowIndex: f.windowIndex,
+        localSpeaker: f.localSpeaker,
+        activeFrames: ACTIVE_FRAMES[f.localSpeaker],
+        vector: speakerVector(f.axis, 4000 + k * 37),
+      });
+    });
+    backend.settle({ ok: true, windowCount });
+  }
+
+  it('reports the two-file model set the diarizer needs', async () => {
+    const t = api();
+    backend.modelState = { downloaded: false, bytes: 1024, expectedBytes: WIRE_MODEL_BYTES };
+
+    const state = await t.getDiarizeModelState();
+
+    expect(state).toEqual({ downloaded: false, bytes: 1024, expectedBytes: WIRE_MODEL_BYTES });
+    expect(backend.modelStateCalls).toBe(1);
+    expectPlainJson(state);
+  });
+
+  it('runs the real host on the active document and flattens the evidence to scalars', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(3));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    streamFixture(3);
+    const summary = await promise;
+
+    expect(summary.ok).toBe(true);
+    expect(summary.status).toBe('ok');
+    expect(summary.message).toBeNull();
+    // The document the hook handed over: its own rate and length, resampled
+    // once to the model's 16 kHz.
+    expect(backend.lastRequest?.sampleRate).toBe(16000);
+    expect(backend.lastRequest?.samples.byteLength).toBe((SEG_WINDOW + 2 * SEG_SHIFT) * 4);
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(docSamplesForWindows(3));
+    expect(summary.totalSamples16k).toBe(SEG_WINDOW + 2 * SEG_SHIFT);
+    expect(summary.windowCount).toBe(3);
+    expect(summary.embeddingCount).toBe(AXES.length);
+    // Two voices, neither folded and neither under the share floor.
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.preFoldClusterCount).toBe(2);
+    expect(summary.rawClusterCount).toBe(2);
+    expect(summary.segmentCount).toBe(2);
+    expect(summary.overlapCount).toBe(0);
+    expect(summary.speechSeconds).toHaveLength(2);
+    for (const s of summary.speechSeconds) expect(s).toBeGreaterThan(0);
+    // The host really streamed, and the service really walked its phases.
+    expect(summary.progressEvents).toBeGreaterThan(0);
+    expect(summary.phasesSeen).toEqual(['resampling', 'segmenting', 'embedding', 'clustering']);
+    expect(summary.maxFraction).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports the fold and the output count as the three DIFFERENT numbers they are', async () => {
+    const t = api();
+    // One window, three one-fragment voices: every cluster is below
+    // MIN_CLUSTER_SIZE, so the measured fold (D3) collapses all three into the
+    // largest and one speaker comes out of three raw clusters.
+    addStemDoc('trio.wav', docSamplesForWindows(1));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    backend.emit.window({ index: 0, labels: fixtureWindow() });
+    [0, 1, 2].forEach((local) => {
+      backend.emit.embedding({
+        windowIndex: 0,
+        localSpeaker: local,
+        activeFrames: ACTIVE_FRAMES[local],
+        vector: speakerVector(local, 7000 + local * 53),
+      });
+    });
+    backend.settle({ ok: true, windowCount: 1 });
+    const summary = await promise;
+
+    expect(summary.preFoldClusterCount).toBe(3);
+    expect(summary.rawClusterCount).toBe(1);
+    expect(summary.speakerCount).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports a missing model set without spawning anything', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+    backend.modelState = { downloaded: false, bytes: null, expectedBytes: WIRE_MODEL_BYTES };
+
+    const summary = await t.diarizeActive();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('model-missing');
+    expect(summary.message).toContain('32.5 MB');
+    expect(backend.runCalls).toBe(0);
+    expect(summary.speakerCount).toBe(0);
+    expectPlainJson(summary);
+  });
+
+  it('reports a host failure as a status and a message, never a rejection', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    backend.settle({ ok: false, error: 'the diarization host died' });
+    const summary = await promise;
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('failed');
+    expect(summary.message).toBe('the diarization host died');
+    expectPlainJson(summary);
+  });
+
+  it('answers no-document without calling the host at all', async () => {
+    const t = api();
+
+    const summary = await t.diarizeActive();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('no-document');
+    expect(backend.runCalls).toBe(0);
+    expect(backend.modelStateCalls).toBe(0);
+    expect(summary.windowCount).toBe(0);
+    expectPlainJson(summary);
   });
 });

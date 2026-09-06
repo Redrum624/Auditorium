@@ -81,6 +81,7 @@ import {
   STEM_LABELS,
   getStemModelState as readStemModelState,
   separateStems as runStemSeparation,
+  type StemSeparationOutput,
 } from './stemService';
 import {
   cancelTranscription,
@@ -103,7 +104,30 @@ import {
   type VoiceProgress,
 } from './voiceService';
 import { formatSrt, formatWebVtt } from './subtitleFormat';
-import { landStems, landVoice } from './stemLanding';
+import { landSpeakers, landStems, landVoice } from './stemLanding';
+import {
+  assembledFrameCount,
+  assembleDiarization,
+  expectedWindowCount,
+  segmentsToDocSamples,
+  windowStartFrame,
+  FRAME_SHIFT,
+  MIN_EMBED_FRAMES,
+  MIN_OFF_S,
+  MIN_ON_S,
+  MODEL_SAMPLE_RATE,
+  POWERSET,
+  SEG_FRAMES,
+  type DiarizationEvidence,
+} from '../dsp/diarization';
+import { unitVector } from '../dsp/testVectors';
+import {
+  diarizeChannels,
+  getDiarizeModelState as readDiarizeModelState,
+  modelLength16k,
+  DIARIZE_EMBEDDING_DIMS,
+  type DiarizeProgress,
+} from './diarizeService';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/firstPlayLatency';
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
@@ -654,6 +678,23 @@ export interface TestApi {
    * shipped `landVoice` — two documents, a two-track session, the multitrack
    * view — without the model. Synchronous, because nothing is inferred. */
   separateVoiceLand(): VoiceLandingSummary;
+  // --- v1.39 flows (Separate Speakers, D6) --------------------------------
+  /** Whether the 32.5 MB two-file diarization set is already on disk. The
+   * smoke's speaker step is gated on this exactly as the stem step is. */
+  getDiarizeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  /** D6: lands a SYNTHETIC speaker separation of the ACTIVE document through
+   * the shipped `assembleDiarization` → `segmentsToDocSamples` →
+   * `landSpeakers` chain — N speaker documents plus Backing, an (N+1)-track
+   * session, the multitrack view — without EITHER model. `count` forces the
+   * speaker count as D5's review select does; omitted, the measured auto
+   * policy decides (and folds two voices into one below MIN_CLUSTER_SIZE
+   * fragments each, which is what the policy does on short audio).
+   * Synchronous, because nothing is inferred. */
+  separateSpeakersLand(count?: number): SpeakerLandingSummary;
+  /** Diarizes the ACTIVE document through the REAL host, bypassing
+   * SeparateDialog. Reports `status: 'model-missing'` rather than downloading
+   * anything, so a machine without the models REPORTS a skip. */
+  diarizeActive(): Promise<DiarizationSummary>;
   // --- F4b flows (transcription) -----------------------------------------
   getTranscribeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   /** Transcribes the ACTIVE document, bypassing TranscribeDialog. Pass a
@@ -861,6 +902,85 @@ export interface VoiceLandingSummary {
   /** Worst |(Voice + Backing) − source| over every channel and sample; null
    * when the source is no longer open and the check could not be made. */
   worstAbsError: number | null;
+}
+
+/** D4/D6 — plain-JSON result of the `separateSpeakersLand` hook. */
+export interface SpeakerLandingSummary {
+  /** False when there was no active document, or it held no audio. */
+  ok: boolean;
+  /** `['<source> — Speaker 1', …, '<source> — Backing']`, in track order —
+   * or the two `landVoice` names when one speaker (or none) came out. */
+  documentNames: string[];
+  /** The landed session's track names, in order. */
+  trackNames: string[];
+  sessionName: string | null;
+  /** Speakers the ASSEMBLY produced, which is what landed: `requested` and
+   * this differ whenever a cluster fell under the share floor (D3). */
+  speakerCount: number;
+  /** The count the caller forced, or null for the measured auto policy. */
+  requestedSpeakerCount: number | null;
+  sampleRate: number;
+  lengthSamples: number;
+  /** Channel count of each landed document (a mono source lands dual-mono). */
+  channelCounts: number[];
+  monoRoutedAsDualMono: boolean;
+  /** Per speaker, the turns the assembly produced for that track — reported
+   * even when one speaker (or none) sent the landing down `landVoice`, where
+   * nothing was masked and the stem landed whole. */
+  segmentCounts: number[];
+  /** Per speaker, seconds of assembled speech (the assembly's own figure). */
+  speechSeconds: number[];
+  /** Per speaker document, its worst |sample| — above zero is the proof the
+   * mask KEPT that speaker's turns rather than silencing everything. Empty
+   * when nothing was masked (one speaker or none: `landVoice` lands the stem
+   * whole). */
+  speakerPeaks: number[];
+  /** Worst |sample| found OUTSIDE the speaker's own turns, over every speaker
+   * document — 0 is the proof the mask silenced everything else. Null when
+   * nothing was masked, which is not the same as zero. */
+  outsideSpansPeak: number | null;
+  /** What the LANDING said, echoed rather than re-derived. `null` for a
+   * speaker split: D4 makes no exact-sum claim in either direction there,
+   * because the edge fades remove audio and an overlapping turn is carried
+   * twice. A confirmed count of one delegates to `landVoice`, and this is then
+   * that landing's own peak-derived verdict. */
+  exactSumHolds: boolean | null;
+}
+
+/** D6 — plain-JSON result of the `diarizeActive` hook. */
+export interface DiarizationSummary {
+  ok: boolean;
+  /** `'ok'` on success, otherwise the service's own `DiarizeStatus` (or
+   * `'no-document'`, which the service never sees). */
+  status: string;
+  /** The service's user-facing failure message; null on success. */
+  message: string | null;
+  /** Output speakers — clusters that ended with at least one segment. */
+  speakerCount: number;
+  /** The auto cut before and after `foldSmallClusters`; the forced count in
+   * forced mode. Three separate numbers, never derived from one another. */
+  preFoldClusterCount: number;
+  rawClusterCount: number;
+  segmentCount: number;
+  overlapCount: number;
+  /** Per output speaker, seconds of assembled speech. */
+  speechSeconds: number[];
+  /** What the HOST delivered: windows and fragment embeddings. */
+  windowCount: number;
+  embeddingCount: number;
+  /** Length of the 16 kHz mono signal the host windowed. */
+  totalSamples16k: number;
+  /** The DOCUMENT's rate and length, before the resample. */
+  sampleRate: number;
+  lengthSamples: number;
+  elapsedMs: number;
+  /** How many progress events the service actually published — 0 would mean
+   * nothing streamed, which a `done`-only assertion would not notice. */
+  progressEvents: number;
+  /** Distinct phases the service passed through, in first-seen order. */
+  phasesSeen: string[];
+  /** Furthest overall fraction reported; 1 once the assembly is reached. */
+  maxFraction: number;
 }
 
 /** Plain-JSON result of the `separateStems` hook (see its implementation). */
@@ -1213,6 +1333,220 @@ async function runTranscriptionHook(
       text: s.text,
       speaker: s.speaker,
     })),
+  };
+}
+
+/**
+ * D4/D6 — the separation output the MODEL would have produced for `source`:
+ * four stems that are an exact partition of it, plus the float32 complement
+ * residual, built the way `partitionStems` builds a real one.
+ *
+ * Shared by `separateVoiceLand` and `separateSpeakersLand` so the two hooks
+ * land the same audio and a smoke can compare their results directly.
+ *
+ * Four DIFFERENT weights, summing to 0.90 so the residual is real audio rather
+ * than zeros: a fixture whose stems were all the same fraction would land
+ * identically with any two of them swapped — the Voice would be 0.37x rather
+ * than 0.19x and nothing would notice.
+ */
+function syntheticSeparation(source: AudioDocument, length: number): StemSeparationOutput {
+  const weights = [0.37, 0.23, 0.19, 0.11]; // Drums, Bass, Vocals, Other
+  const stems = weights.map((w) =>
+    source.channels.map((ch) => {
+      const out = new Float32Array(length);
+      for (let i = 0; i < length; i++) out[i] = w * ch[i];
+      return out;
+    })
+  );
+  const residual = source.channels.map((ch, c) => {
+    const out = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+      // `Math.fround` per step: the float32 accumulation in ruling-6 order
+      // that the real residual is the complement of, so this fixture has the
+      // partition's exact-sum property rather than merely resembling it.
+      let sum = 0;
+      for (const stem of stems) sum = Math.fround(sum + stem[c][i]);
+      out[i] = Math.fround(ch[i] - sum);
+    }
+    return out;
+  });
+  return {
+    sourceDocId: source.id,
+    sourceName: source.name,
+    sampleRate: source.sampleRate,
+    channelCount: source.channels.length,
+    lengthSamples: length,
+    stems: STEM_LABELS.map((label, i) => ({ label, channels: stems[i] })),
+    residual,
+    sanitisedEstimateSamples: 0,
+  };
+}
+
+/**
+ * D6 — frames in one synthetic turn, and not a taste value: it is the shortest
+ * turn that survives the assembler's own two rules whole.
+ *
+ * A turn shorter than MIN_ON_S is dropped outright, and the silence between two
+ * turns of ONE speaker must exceed MIN_OFF_S or the assembler merges them
+ * across the other speaker's turn — which, in a strictly alternating timeline,
+ * is the same duration. One turn therefore has to clear both, so the length is
+ * their sum expressed in frames (`(0.5 + 0.3) s x 16000 / 270`, rounded up).
+ * Derived rather than written down so it cannot drift if D3's constants ever
+ * are re-measured.
+ */
+const HOOK_TURN_FRAMES = Math.ceil(((MIN_OFF_S + MIN_ON_S) * MODEL_SAMPLE_RATE) / FRAME_SHIFT);
+
+/** D6 — voices in the synthetic timeline: two, the smallest number for which
+ * "separate the speakers" means anything. It is at most LOCAL_SPEAKERS by
+ * construction, so every voice always finds a local slot in its window. */
+const HOOK_SPEAKER_COUNT = 2;
+
+/** D6 — first seed handed to `unitVector`. Any integer would do; a fixed one
+ * makes every fragment of every run bit-identical, which is what lets the
+ * smoke assert an exact landing. */
+const HOOK_VECTOR_SEED = 31;
+
+/**
+ * D6 — the evidence a diarization host WOULD have produced for a recording of
+ * `HOOK_SPEAKER_COUNT` speakers taking strict turns across the whole of
+ * `lengthSamples` at `sampleRate`, and nothing else: no overlap, no silence.
+ *
+ * Built the way D1/D2 say the host builds it, so the shipped assembly is what
+ * runs on it: the audio's own 16 kHz length decides the window count, each
+ * window carries one powerset SINGLETON class per frame, local slots are handed
+ * out in order of first appearance INSIDE that window (so the two voices swap
+ * slots from window to window, exactly as they do in a real run — which is
+ * precisely what makes clustering necessary rather than decorative), and a
+ * local speaker is embedded only once it holds MIN_EMBED_FRAMES of the window.
+ *
+ * The voices are `unitVector` directions on two different axes — the shared
+ * recipe of `src/dsp/testVectors.ts`, whose header names this hook: the
+ * diarization unit tests, the `diarizeBackend` fake and this landing must all
+ * speak about the SAME synthetic voices, or a landing driven from here would
+ * exercise different vectors than the unit tests pinned. Deliberately NOT an
+ * import from `src/__mocks__`: this file ships in the renderer bundle.
+ *
+ * Frames past the end of the assembled range stay class 0 (silence) — a real
+ * host's zero-padded tail window predicts nothing there either.
+ */
+function syntheticSpeakerEvidence(lengthSamples: number, sampleRate: number): DiarizationEvidence {
+  const totalSamples16k = modelLength16k(lengthSamples, sampleRate);
+  const windowCount = expectedWindowCount(totalSamples16k);
+  const frameCount = assembledFrameCount(totalSamples16k, windowCount);
+  const singletonClass = (local: number): number =>
+    POWERSET.findIndex((set) => set.length === 1 && set[0] === local);
+
+  const windows: Uint8Array[] = [];
+  const embeddings: DiarizationEvidence['embeddings'] = [];
+  let seed = HOOK_VECTOR_SEED;
+  for (let i = 0; i < windowCount; i++) {
+    const start = windowStartFrame(i);
+    const classes = new Uint8Array(SEG_FRAMES);
+    const slotOf = new Map<number, number>();
+    const activeFrames = new Array<number>(HOOK_SPEAKER_COUNT).fill(0);
+    for (let f = 0; f < SEG_FRAMES; f++) {
+      const g = start + f;
+      if (g >= frameCount) break;
+      const speaker = Math.floor(g / HOOK_TURN_FRAMES) % HOOK_SPEAKER_COUNT;
+      let local = slotOf.get(speaker);
+      if (local === undefined) {
+        local = slotOf.size;
+        slotOf.set(speaker, local);
+      }
+      classes[f] = singletonClass(local);
+      activeFrames[speaker]++;
+    }
+    windows.push(classes);
+    for (const [speaker, local] of slotOf) {
+      if (activeFrames[speaker] < MIN_EMBED_FRAMES) continue;
+      embeddings.push({
+        windowIndex: i,
+        localSpeaker: local,
+        activeFrames: activeFrames[speaker],
+        vector: unitVector(DIARIZE_EMBEDDING_DIMS, speaker, seed++),
+      });
+    }
+  }
+  return { totalSamples16k, windows, embeddings };
+}
+
+/**
+ * The body behind `diarizeActive`: one real run through the real service on the
+ * ACTIVE document, with the progress stream RECORDED so the smoke can prove the
+ * host actually streamed rather than only that it finished.
+ *
+ * Everything the service hands back that is a typed array — the window bytes,
+ * the 256-d fragment vectors — is reduced to a count here: a `Uint8Array` that
+ * escaped would arrive on the harness side as an object keyed by index, and the
+ * smoke's numeric assertions would compare against `undefined` (T16).
+ */
+async function runDiarizationHook(): Promise<DiarizationSummary> {
+  const empty: DiarizationSummary = {
+    ok: false,
+    status: 'no-document',
+    message: null,
+    speakerCount: 0,
+    preFoldClusterCount: 0,
+    rawClusterCount: 0,
+    segmentCount: 0,
+    overlapCount: 0,
+    speechSeconds: [],
+    windowCount: 0,
+    embeddingCount: 0,
+    totalSamples16k: 0,
+    sampleRate: 0,
+    lengthSamples: 0,
+    elapsedMs: 0,
+    progressEvents: 0,
+    phasesSeen: [],
+    maxFraction: 0,
+  };
+  const doc = activeDoc();
+  if (!doc) return empty;
+
+  let progressEvents = 0;
+  let maxFraction = 0;
+  const phasesSeen: string[] = [];
+  const onProgress = (p: DiarizeProgress): void => {
+    progressEvents++;
+    if (!phasesSeen.includes(p.phase)) phasesSeen.push(p.phase);
+    if (p.fraction > maxFraction) maxFraction = p.fraction;
+  };
+
+  const startedAt = Date.now();
+  // The document's channels are READ by the service (it mixes and resamples a
+  // fresh buffer), which is why they can be passed straight in.
+  const result = await diarizeChannels({
+    channels: doc.channels,
+    sampleRate: doc.sampleRate,
+    onProgress,
+  });
+  const observed = {
+    elapsedMs: Date.now() - startedAt,
+    progressEvents,
+    phasesSeen,
+    maxFraction,
+    sampleRate: doc.sampleRate,
+    lengthSamples: docLength(doc),
+  };
+  if (!result.ok) {
+    return { ...empty, ...observed, status: result.status, message: result.message };
+  }
+  const d = result.diarization;
+  return {
+    ...empty,
+    ...observed,
+    ok: true,
+    status: 'ok',
+    speakerCount: d.speakerCount,
+    preFoldClusterCount: d.preFoldClusterCount,
+    rawClusterCount: d.rawClusterCount,
+    segmentCount: d.segments.length,
+    overlapCount: d.overlapSegments.length,
+    speechSeconds: d.speechSeconds,
+    windowCount: result.evidence.windows.length,
+    embeddingCount: result.evidence.embeddings.length,
+    totalSamples16k: result.evidence.totalSamples16k,
   };
 }
 
@@ -2323,12 +2657,9 @@ export function installTestHooks(): void {
     // assert the two-track landing without 166 MB and minutes of CPU, and the
     // model is `separateStems`' business — already covered by the hook below.
     //
-    // The synthetic output is an EXACT partition of the active document, built
-    // the way `partitionStems` builds a real one: four stems at four DIFFERENT
-    // weights (so a landing that grabbed the wrong stem index is visible — the
-    // Voice would be 0.37x rather than 0.19x), then a residual that is the
-    // float32 complement accumulated in the ruling-6 order the five-track
-    // landing replays. Everything after that is the shipped code path.
+    // The synthetic output is an EXACT partition of the active document
+    // (`syntheticSeparation`, whose header argues the weights and the residual).
+    // Everything after that is the shipped code path.
     separateVoiceLand: () => {
       const empty: VoiceLandingSummary = {
         ok: false,
@@ -2345,41 +2676,7 @@ export function installTestHooks(): void {
       const length = source ? docLength(source) : 0;
       if (!source || length === 0) return empty;
 
-      // Four DIFFERENT weights, summing to 0.90 so the residual is real audio
-      // rather than zeros: a fixture whose stems were all the same fraction
-      // would land identically with any two of them swapped.
-      const weights = [0.37, 0.23, 0.19, 0.11]; // Drums, Bass, Vocals, Other
-      const stems = weights.map((w) =>
-        source.channels.map((ch) => {
-          const out = new Float32Array(length);
-          for (let i = 0; i < length; i++) out[i] = w * ch[i];
-          return out;
-        })
-      );
-      const residual = source.channels.map((ch, c) => {
-        const out = new Float32Array(length);
-        for (let i = 0; i < length; i++) {
-          // `Math.fround` per step: the float32 accumulation in ruling-6 order
-          // that the real residual is the complement of, so this fixture has
-          // the partition's exact-sum property rather than merely resembling
-          // it.
-          let sum = 0;
-          for (const stem of stems) sum = Math.fround(sum + stem[c][i]);
-          out[i] = Math.fround(ch[i] - sum);
-        }
-        return out;
-      });
-
-      const landing = landVoice({
-        sourceDocId: source.id,
-        sourceName: source.name,
-        sampleRate: source.sampleRate,
-        channelCount: source.channels.length,
-        lengthSamples: length,
-        stems: STEM_LABELS.map((label, i) => ({ label, channels: stems[i] })),
-        residual,
-        sanitisedEstimateSamples: 0,
-      });
+      const landing = landVoice(syntheticSeparation(source, length));
 
       const store = useAppStore.getState();
       const byId = new Map(store.documents.map((d) => [d.id, d]));
@@ -2414,6 +2711,121 @@ export function installTestHooks(): void {
         worstAbsError,
       };
     },
+
+    // D6. Whether the 32.5 MB two-file diarization set is already on disk. The
+    // smoke's speaker step is gated on this exactly as the stem, transcription
+    // and voice steps are: the files are downloaded on first use and are NOT
+    // in the repo, so a machine without them must REPORT a skip, never pass
+    // quietly.
+    getDiarizeModelState: () => readDiarizeModelState(),
+
+    // D6. Lands Separate Speakers WITHOUT either model: the smoke must be able
+    // to assert the N+1-track landing without 198 MB and minutes of CPU, and
+    // both models are the services' business — covered by `separateStems` and
+    // by `diarizeActive` below.
+    //
+    // Two synthetic halves, both built where their arithmetic is explained:
+    // `syntheticSeparation` for the exact stem partition of the active
+    // document, `syntheticSpeakerEvidence` for the host output of two speakers
+    // taking strict turns across it. Everything after those two calls is the
+    // shipped code path — the same assembly, the same document mapping and the
+    // same `landSpeakers` the dialog runs.
+    separateSpeakersLand: (count) => {
+      const requestedSpeakerCount = count ?? null;
+      const empty: SpeakerLandingSummary = {
+        ok: false,
+        documentNames: [],
+        trackNames: [],
+        sessionName: null,
+        speakerCount: 0,
+        requestedSpeakerCount,
+        sampleRate: 0,
+        lengthSamples: 0,
+        channelCounts: [],
+        monoRoutedAsDualMono: false,
+        segmentCounts: [],
+        speechSeconds: [],
+        speakerPeaks: [],
+        outsideSpansPeak: null,
+        exactSumHolds: null,
+      };
+      const source = activeDoc();
+      const length = source ? docLength(source) : 0;
+      if (!source || length === 0) return empty;
+
+      const evidence = syntheticSpeakerEvidence(length, source.sampleRate);
+      const diarization =
+        requestedSpeakerCount === null
+          ? assembleDiarization(evidence)
+          : assembleDiarization(evidence, { speakerCount: requestedSpeakerCount });
+      const docSpans = segmentsToDocSamples(diarization, source.sampleRate, length);
+      const landing = landSpeakers(syntheticSeparation(source, length), docSpans);
+
+      const byId = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      const landed = landing.documentIds.map((id) => byId.get(id) ?? null);
+
+      // The mask is only measurable where a mask was APPLIED: at one speaker or
+      // none, `landSpeakers` delegates to `landVoice` and the stem lands whole,
+      // so there is no "outside the turns" to look at and the field says null
+      // rather than a zero that would read as proof of something.
+      const masked = docSpans.length > 1;
+      const speakerPeaks: number[] = [];
+      let outside = 0;
+      for (let k = 0; masked && k < docSpans.length; k++) {
+        const doc = landed[k];
+        if (!doc) {
+          speakerPeaks.push(0);
+          continue;
+        }
+        const spans = [...docSpans[k]].sort((a, b) => a.startSample - b.startSample);
+        let peak = 0;
+        for (const ch of doc.channels) {
+          for (let i = 0; i < ch.length; i++) {
+            const v = Math.abs(ch[i]);
+            if (v > peak) peak = v;
+          }
+          // The gaps between this speaker's own turns, then the tail after the
+          // last one: `keepSpans` zeroes every sample there, so anything above
+          // zero is audio the mask failed to remove.
+          let cursor = 0;
+          for (const s of spans) {
+            const stop = Math.min(s.startSample, ch.length);
+            for (let i = cursor; i < stop; i++) {
+              const v = Math.abs(ch[i]);
+              if (v > outside) outside = v;
+            }
+            if (s.endSample > cursor) cursor = s.endSample;
+          }
+          for (let i = cursor; i < ch.length; i++) {
+            const v = Math.abs(ch[i]);
+            if (v > outside) outside = v;
+          }
+        }
+        speakerPeaks.push(peak);
+      }
+
+      return {
+        ok: true,
+        documentNames: landed.map((d) => d?.name ?? '(missing)'),
+        trackNames: useSessionStore.getState().session.tracks.map((t) => t.name),
+        sessionName: landing.sessionName,
+        speakerCount: diarization.speakerCount,
+        requestedSpeakerCount,
+        sampleRate: source.sampleRate,
+        lengthSamples: length,
+        channelCounts: landed.map((d) => d?.channels.length ?? 0),
+        monoRoutedAsDualMono: landing.monoRoutedAsDualMono,
+        segmentCounts: docSpans.map((spans) => spans.length),
+        speechSeconds: diarization.speechSeconds,
+        speakerPeaks,
+        outsideSpansPeak: masked ? outside : null,
+        // D4's own value, not a re-derivation: `landSpeakers` overrides the
+        // partition verdict to "no claim" and this reports what it said.
+        exactSumHolds: landing.exactSumHolds,
+      };
+    },
+
+    diarizeActive: () => runDiarizationHook(),
 
     // Separates the ACTIVE document into stems and lands them, bypassing
     // SeparateDialog entirely — the same two calls the dialog makes
