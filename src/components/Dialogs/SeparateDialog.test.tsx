@@ -911,7 +911,13 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     });
     expect(label()).toContain('Listening for speakers — window 14 of 57');
     const atSegment = width('separate-progress');
-    expect(atSegment).toBeGreaterThanOrEqual(Math.round(STAGE_WEIGHTS.separate * 100));
+    // The stage-2 span is BOTH remaining weights, not the segmentation share
+    // alone: at fraction 0.03 the whole span reads 92 % and segmentation-only
+    // reads 91, so an exact pin is what tells the two apart. A relative
+    // `toBeGreaterThan` cannot — every wrong span still rises.
+    expect(atSegment).toBe(
+      Math.round((STAGE_WEIGHTS.separate + (STAGE_WEIGHTS.segment + STAGE_WEIGHTS.embed) * 0.03) * 100)
+    );
 
     act(() => {
       onDiarizeProgress({
@@ -925,6 +931,9 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     });
     expect(label()).toContain('Comparing voices — 23 of 41');
     expect(width('separate-progress')).toBeGreaterThan(atSegment);
+    expect(width('separate-progress')).toBe(
+      Math.round((STAGE_WEIGHTS.separate + (STAGE_WEIGHTS.segment + STAGE_WEIGHTS.embed) * 0.6) * 100)
+    );
 
     // D5: the assembly runs behind the LAST label after a yield — a
     // 'clustering' event must not blank the line the user is reading.
@@ -939,6 +948,11 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
       });
     });
     expect(label()).toContain('Comparing voices — 23 of 41');
+    // The terminal stage-2 event FILLS the bar. D5's weights are a partition
+    // of the run, so stage 1's weight plus the whole of stage 2 is 1 — a bar
+    // that stops at 92 % here means the embedding share was dropped from the
+    // span and the review panel opens over an unfinished bar.
+    expect(width('separate-progress')).toBe(100);
 
     await act(async () => {
       diarPending.resolve({ ok: true, evidence: makeEvidence(), diarization: makeDiarization() });
@@ -998,8 +1012,14 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
   });
 
   it('VR2. hands the VOCALS stem to the diarizer at the output rate, and nothing else', async () => {
+    // The document is 44.1 kHz and the OUTPUT is 48 kHz, on purpose: with both
+    // at 44,100 the rate the dialog forwards, the document's rate and a
+    // hardcoded literal are one number, and the assertion below would be
+    // measuring the identity. `diarizeService` resamples from THIS rate, so a
+    // dialog that passed the document's would put every window index and every
+    // returned span out by 8.8 % on a 48 kHz source.
     seedDoc();
-    const output = makeVoiceOutput();
+    const output = makeVoiceOutput({ sampleRate: 48_000 });
     mockSeparate.mockResolvedValue({ ok: true, output });
     await renderVoice();
 
@@ -1012,7 +1032,9 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // By REFERENCE: the Vocals stem is hundreds of megabytes and is read, not
     // copied — and it is Vocals, not the first stem in the array.
     expect(req.channels).toBe(output.stems[2].channels);
+    expect(req.sampleRate).toBe(48_000);
     expect(req.sampleRate).toBe(output.sampleRate);
+    expect(req.sampleRate).not.toBe(SR);
     expect(typeof req.shouldCancel).toBe('function');
     expect(mockLandSpeakers).not.toHaveBeenCalled();
   });
@@ -1181,6 +1203,53 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockLandSpeakers.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0]);
     // No exactness claim for a speaker split (D4) — and no note pretending one.
     expect(screen.queryByTestId('separate-note-exactness')).not.toBeInTheDocument();
+  });
+
+  it('VR11b. spans are CLAMPED to the document length, and one that ends inside it is untouched', async () => {
+    // The model's own segments may run past the audio (D1: a closing run
+    // overshoots by up to half a receptive field, and a re-cluster inherits
+    // that), so the dialog hands `segmentsToDocSamples` the OUTPUT's length as
+    // the clamp bound. Every other voice fixture is 15 minutes long against
+    // segments that end 5 seconds in, so the clamp never bites and the bound
+    // could be anything at all — `Number.MAX_SAFE_INTEGER` included. This one
+    // is short enough that it does: one span ends past the document (and comes
+    // back exactly AT the bound) while another ends two samples inside it (and
+    // must come back untouched), so the clamp is pinned on both sides.
+    seedDoc();
+    const output = makeVoiceOutput({ lengthSamples: 400_000 });
+    mockSeparate.mockResolvedValue({ ok: true, output });
+    const diarization = makeDiarization({
+      segments: [
+        // 8,000 → 56,000 at 16 kHz is 22,050 → 154,350 at 44.1 kHz: well inside.
+        { startSample16k: 8_000, endSample16k: 56_000, speaker: 0 },
+        // 145,124 maps to 399,998 — two samples short of the end, so a clamp at
+        // the document length must leave it exactly where it is.
+        { startSample16k: 136_000, endSample16k: 145_124, speaker: 0 },
+        // 232,000 maps to 639,450, past the end of a 400,000-sample document.
+        { startSample16k: 140_000, endSample16k: 232_000, speaker: 1 },
+      ],
+    });
+    mockDiarize.mockResolvedValue({ ok: true, evidence: makeEvidence(), diarization });
+    await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Land 2 speakers + Backing' }));
+    });
+
+    // Written out rather than recomputed through `segmentsToDocSamples`: the
+    // point of the test is the ARGUMENT the dialog chooses for the bound, and
+    // a re-run of the same function with the same bound would agree with any
+    // bound the dialog picked.
+    expect(mockLandSpeakers).toHaveBeenCalledWith(output, [
+      [
+        { startSample: 22_050, endSample: 154_350 },
+        { startSample: 374_850, endSample: 399_998 },
+      ],
+      [{ startSample: 385_875, endSample: 400_000 }],
+    ]);
   });
 
   it('VR12. Land uses the RE-CLUSTERED spans, not the ones the auto pass produced', async () => {
@@ -1413,6 +1482,45 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockDiarize).not.toHaveBeenCalled();
     expect(screen.getByTestId('separate-error')).toHaveTextContent('Speaker separation was cancelled.');
     expect(screen.queryByTestId('speaker-review')).not.toBeInTheDocument();
+  });
+
+  it('VC2b. the NEXT run after a cancel is a clean run — the cancel latch is per-run', async () => {
+    // D5's `cancelledRef` is what makes a cancelled stem result get discarded,
+    // and it is only ever set to false at the START of a run. Without that
+    // reset a Cancel poisons the dialog for the rest of its life: every later
+    // run pays Demucs in full (ten minutes on a 15-minute source), then throws
+    // the output away before a diarizer is ever spawned and prints the cancel
+    // message for a run the user never cancelled.
+    seedDoc();
+    const first = deferred<StemSeparationResult>();
+    mockSeparate.mockReturnValue(first.promise);
+    await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    });
+    await act(async () => {
+      first.resolve({ ok: true, output: makeVoiceOutput() });
+    });
+    expect(mockDiarize).not.toHaveBeenCalled();
+    expect(screen.getByTestId('separate-error')).toHaveTextContent('Speaker separation was cancelled.');
+
+    // Second run, same mounted dialog.
+    const output = makeVoiceOutput();
+    mockSeparate.mockResolvedValue({ ok: true, output });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    expect(mockDiarize).toHaveBeenCalledTimes(1);
+    expect(mockDiarize.mock.calls[0][0].channels).toBe(output.stems[2].channels);
+    // The predicate `diarizeChannels` polls reads false again, so the service
+    // is not asked to cancel itself before it spawns.
+    expect(mockDiarize.mock.calls[0][0].shouldCancel!()).toBe(false);
+    expect(screen.getByTestId('speaker-review')).toBeInTheDocument();
+    expect(screen.queryByTestId('separate-error')).not.toBeInTheDocument();
   });
 
   it('VC3. Cancel during the speaker stage kills the DIARIZER, not the stem host', async () => {
