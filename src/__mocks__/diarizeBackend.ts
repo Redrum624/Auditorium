@@ -68,6 +68,18 @@ export interface DiarizeBackend {
   ensureResult: { ok: true } | { ok: false; error: string };
   /** When set, the run invoke REJECTS with this message (a dead IPC channel). */
   invokeThrows: string | null;
+  /**
+   * Whether `diarizeCancel` settles the pending run invoke `{cancelled:true}`.
+   *
+   * True is the ordinary manager: `cancel()` finds a live entry and settles it
+   * (`diarizeManager.cjs:429-431`). FALSE is the race the manager can also
+   * produce — the host's `done` settled the entry first
+   * (`diarizeManager.cjs:403`), and settling nulls `active` (:293-297), so the
+   * Cancel that arrives a tick later finds nothing to kill and answers
+   * `{cancelled:false}` while the run invoke is already resolved
+   * `{ok:true,windowCount}`. A test in that mode settles the invoke itself.
+   */
+  cancelSettlesRun: boolean;
   showMessageBox: jest.Mock;
   /** True while a run invoke is awaiting its settlement. */
   isPending(): boolean;
@@ -132,6 +144,7 @@ export function installDiarizeBackend(): DiarizeBackend {
     modelState: { downloaded: true, bytes: WIRE_MODEL_BYTES, expectedBytes: WIRE_MODEL_BYTES },
     ensureResult: { ok: true },
     invokeThrows: null,
+    cancelSettlesRun: true,
     showMessageBox: jest.fn().mockResolvedValue(0),
     isPending: () => pending !== null,
     settle(result) {
@@ -195,7 +208,12 @@ export function installDiarizeBackend(): DiarizeBackend {
       backend.cancelCalls++;
       // The manager kills the child, so the in-flight invoke resolves
       // cancelled and the renderer's run settles through its normal path.
-      if (pending) {
+      //
+      // Unless the run was already settled when the Cancel landed — the
+      // manager's `active` is null by then and its `cancel()` returns false
+      // having done nothing (`cancelSettlesRun`'s docblock). The fake reports
+      // the same `{cancelled:false}` and leaves the pending invoke alone.
+      if (pending && backend.cancelSettlesRun) {
         backend.settle({ ok: false, cancelled: true });
         return { cancelled: true };
       }

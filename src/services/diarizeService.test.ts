@@ -33,6 +33,9 @@ import { monoMix } from './transcribeService';
 import { resampleChannel } from '../dsp/resample';
 import { MEASURED_REALTIME_FACTOR } from './stemService';
 import { assembleDiarization, expectedWindowCount, frameToSample16k } from '../dsp/diarization';
+// The SAME module, as a namespace: `jest.spyOn` needs the object the service
+// calls through to observe WHEN the assembly runs (the ordering pin below).
+import * as diarizationDsp from '../dsp/diarization';
 
 // ---------------------------------------------------------------------------
 // The fixture — a 12 s stereo 44.1 kHz "Vocals stem" that resamples to exactly
@@ -132,6 +135,13 @@ async function flushUntil(pred: () => boolean, ticks = 80): Promise<void> {
 /** Streams the whole fixture: 3 windows, host progress for both stages, the
  * nine embeddings, then a successful settlement. */
 function streamFixture(windowCount = 3): void {
+  streamFixtureEvidence(windowCount);
+  backend.settle({ ok: true, windowCount });
+}
+
+/** Everything the host emits BEFORE its `done` — the same stream without the
+ * settlement, so a test can decide what settles the invoke and when. */
+function streamFixtureEvidence(windowCount = 3): void {
   for (let i = 0; i < windowCount; i++) {
     backend.emit.progress({ stage: 'segment', done: i + 1, total: windowCount });
     backend.emit.window({ index: i, labels: fixtureWindow() });
@@ -145,7 +155,6 @@ function streamFixture(windowCount = 3): void {
       vector: speakerVector(f.axis, 4000 + k * 37),
     });
   });
-  backend.settle({ ok: true, windowCount });
 }
 
 /**
@@ -617,6 +626,64 @@ describe('cancellation', () => {
     expect(backend.liveListeners).toBe(0);
     expect(getDiarizeBusyCount()).toBe(0);
   });
+
+  it('wins over an {ok:true} settlement when the host won the race', async () => {
+    // The race is the manager's, not a hypothetical: `diarizeManager.cjs:403`
+    // settles {ok:true,windowCount} the instant the host reports `done`, and
+    // settling nulls its `active` (:293-297), so a Cancel landing one tick
+    // later finds nothing to kill and answers {cancelled:false} (:429-431)
+    // while the renderer's invoke has ALREADY resolved {ok:true}. Meanwhile
+    // `cancelDiarization` set `run.cancelled` synchronously. Without the
+    // cancel read at the invoke's return, this run resolves
+    // {ok:true, evidence, diarization} — the dialog opens its review panel and
+    // offers Land for a run the user stopped.
+    //
+    // Every other cancel test here takes the SETTLEMENT's cancelled branch
+    // instead, because the fake's cancel settles the pending invoke; the
+    // `cancelSettlesRun = false` mode is that ordering and nothing else.
+    backend.cancelSettlesRun = false;
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    streamFixtureEvidence();
+    expect(await cancelDiarization()).toBe(true);
+    // The host had already finished: the manager answers with the success it
+    // was holding.
+    backend.settle({ ok: true, windowCount: 3 });
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    expect(backend.cancelCalls).toBe(1);
+    // A cancel is not a failure, and it leaves nothing reserved behind it.
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.liveListeners).toBe(0);
+  });
+
+  it('answers that race cancelled rather than as a window-count failure', async () => {
+    // What separates the cancel read at the invoke's return from the one
+    // behind the clustering yield — both answer 'cancelled' for the test
+    // above, so only this shape tells them apart. A Cancel that lands while
+    // the host is still streaming leaves fewer windows than its `done` counts,
+    // and the count check sits BETWEEN the two reads: without the first one,
+    // this run raises a native "reported 3 window(s) but delivered 1" box and
+    // reports 'failed' for a run the user stopped.
+    backend.cancelSettlesRun = false;
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    backend.emit.window({ index: 0, labels: fixtureWindow() });
+    expect(await cancelDiarization()).toBe(true);
+    backend.settle({ ok: true, windowCount: 3 });
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.liveListeners).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -993,6 +1060,87 @@ describe('progress', () => {
       expect(p.fraction).toBeGreaterThanOrEqual(fraction);
       fraction = p.fraction;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The paint the assembly runs behind (D5)
+// ---------------------------------------------------------------------------
+
+describe('the clustering label is painted before the assembly', () => {
+  it('publishes the label, yields to a paint, and only then assembles', async () => {
+    // D5: "the assembly runs behind the last label after a yield". Ordering is
+    // the whole point — publishing 'clustering' and calling the assembler in
+    // the same synchronous stretch emits the right events in the right order
+    // and still leaves the user staring at "Comparing voices" with the bar at
+    // 100 % while the main thread blocks in the clusterer.
+    //
+    // `invocationCallOrder` is one monotonic counter shared by every jest mock,
+    // which is what makes an order across three unrelated functions
+    // observable — the same instrument `vocalChain.test.ts:4966-4999` uses on
+    // `announceMeasuring`, whose shape this yield borrows.
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+    const assemble = jest.spyOn(diarizationDsp, 'assembleDiarization');
+    const onProgress = jest.fn<void, [DiarizeProgress]>();
+
+    const result = await runFixture({ onProgress });
+    expect(result.ok).toBe(true);
+
+    const clustering = onProgress.mock.calls.findIndex((c) => c[0].phase === 'clustering');
+    expect(clustering).toBeGreaterThanOrEqual(0);
+    expect(assemble).toHaveBeenCalledTimes(1);
+    // ONE frame per run, not per stage: this is the only yield on the path.
+    expect(raf).toHaveBeenCalledTimes(1);
+
+    const label = onProgress.mock.invocationCallOrder[clustering];
+    const paint = raf.mock.invocationCallOrder[0];
+    expect(label).toBeLessThan(paint);
+    expect(assemble.mock.invocationCallOrder[0]).toBeGreaterThan(paint);
+
+    assemble.mockRestore();
+    raf.mockRestore();
+  });
+
+  it('yields only for a consumer that asked for progress', async () => {
+    // A frame is real work, and a caller with no `onProgress` has no label on
+    // screen to paint behind — Task 6's landing hook and the bench drive this
+    // service with no callback at all. The gate is the contract
+    // `announceMeasuring` states for the chains (vocalChain.ts:2135-2153),
+    // kept here for the same reason.
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+    const result = await runFixture();
+    expect(result.ok).toBe(true);
+    expect(raf).not.toHaveBeenCalled();
+    raf.mockRestore();
+  });
+
+  it('lets a Cancel raised during that paint win over the finished run', async () => {
+    // The yield opens a real window: one frame, with the dialog's Cancel live
+    // and the invoke already resolved {ok:true}. The read at the invoke's
+    // return happened BEFORE this publish, so it cannot cover this — without a
+    // second read behind the yield the run assembles and resolves ok, and the
+    // dialog reviews a run the user stopped.
+    const assemble = jest.spyOn(diarizationDsp, 'assembleDiarization');
+    const promise = diarizeChannels({
+      channels: makeChannels(),
+      sampleRate: SOURCE_RATE,
+      onProgress: (p) => {
+        if (p.phase === 'clustering') void cancelDiarization();
+      },
+    });
+    await flushUntil(() => backend.isPending());
+    streamFixture();
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    // Stopped before the expensive part, not after it.
+    expect(assemble).not.toHaveBeenCalled();
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.liveListeners).toBe(0);
+    assemble.mockRestore();
   });
 });
 

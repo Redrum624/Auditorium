@@ -46,6 +46,11 @@
  *   - `cancelDiarization()` handles a Cancel raised while the host is running:
  *     the manager kills the child, the in-flight invoke resolves
  *     `{ok:false,cancelled:true}` and the run settles through its normal path.
+ *     When it arrives too late for that — the host's `done` won the race, so
+ *     the manager answered `{ok:true}` and has nothing left to kill — the
+ *     `run.cancelled` reads at the invoke's return and behind the clustering
+ *     yield are what keep it a cancel instead of a run the dialog offers to
+ *     land.
  *
  * ## Lifetime
  *
@@ -141,12 +146,13 @@ export const MEASURED_SEGMENT_MS_PER_S = 8;
  *
  * MEASURED (D5): the spike's four recordings embedded at 29.13 / 45.71 /
  * 65.29 / 72.51 ms per audio second (`spike-results.json`,
- * `embedding_ms / duration_s`), and 55 is the MEDIAN of that spread — the
- * middle two straddle it — not the midpoint of the 29-73 range (~51) and not
- * its top. The spread is wide (the slowest file costs 2.5x the fastest), so a
- * seed at the top would over-state the wait on half the set; the median is the
- * honest first guess, and it too is replaced by this run's own measured rate
- * at the first embed event.
+ * `embedding_ms / duration_s`), and 55 sits between the middle two of that
+ * spread — 45.71 and 65.29, whose mean, the median of the four, is 55.50, so
+ * D5's seed is that median rounded down. It is neither the midpoint of the
+ * 29-73 range (~51) nor its top. The spread is wide (the slowest file costs
+ * 2.5x the fastest), so a seed at the top would over-state the wait on half
+ * the set; the middle of the set is the honest first guess, and it too is
+ * replaced by this run's own measured rate at the first embed event.
  *
  * Per audio second rather than per fragment because the fragment
  * count is not known until segmentation finishes, while the relationship D5
@@ -333,6 +339,34 @@ function showFailure(message: string): void {
   void api()?.showMessageBox?.({ type: 'error', title: 'Speaker separation failed', message });
 }
 
+/**
+ * One REAL task boundary, so a label just published reaches the screen before
+ * the main thread blocks behind it (D5: "the assembly runs behind the last
+ * label after a yield").
+ *
+ * A microtask is not enough: `await Promise.resolve()` drains before the
+ * browser paints, so it would satisfy an ordering test and present nothing.
+ * `requestAnimationFrame` runs immediately before a paint and a `setTimeout`
+ * scheduled from inside it resolves after that frame was presented. The
+ * timer-only path is the fallback for a context with no rAF at all — a worker
+ * or a bare Node test environment — where there is nothing to paint and the
+ * task boundary is all that is left to honour.
+ *
+ * Copied rather than imported, deliberately: `vocalChain.ts`'s `yieldToPaint`
+ * (:2116-2133, whose docblock argues the above at length, measured on the
+ * cover chain's Match Reverb) is module-private, and importing `vocalChain`
+ * for eight lines would pull the whole vocal chain into the diarization path.
+ */
+function yieldToPaint(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Run state — one at a time, exactly like the manager
 // ---------------------------------------------------------------------------
@@ -347,7 +381,6 @@ interface ActiveRun {
   audioSeconds: number;
   cancelled: boolean;
   cancelInvoked: boolean;
-  settled: boolean;
   startedAt: number;
   /** Wall clock at the first 'segment' event, and at the last one — the second
    * is where the embedding stage's own clock starts. */
@@ -399,9 +432,19 @@ function publishProgress(
  * `{ok:false, cancelled:true}` and the awaiting run settles through its normal
  * path — abort never settles the promise itself, so there is exactly one
  * settlement site.
+ *
+ * `cancelled` is the ONLY flag it reads, and there is no settled flag to read:
+ * the sole caller is `cancelDiarization`, which passes `active`, and the run's
+ * `finally` unsubscribes and nulls `active` in one synchronous block — a
+ * settled run is never `active`, so a settled-check here could not fire.
+ * What this DOES leave open, stated rather than guarded against: the cancel it
+ * records can land after the manager already answered `{ok:true}`, and the two
+ * reads of `run.cancelled` in `diarizeChannels` (at the invoke's return and
+ * behind the clustering yield) are what make that a cancel and not a run the
+ * user is offered to land.
  */
 function abortRun(run: ActiveRun): void {
-  if (run.settled || run.cancelled) return;
+  if (run.cancelled) return;
   run.cancelled = true;
   if (!run.cancelInvoked) {
     run.cancelInvoked = true;
@@ -582,7 +625,6 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     audioSeconds: length / sampleRate,
     cancelled: false,
     cancelInvoked: false,
-    settled: false,
     startedAt: Date.now(),
     segmentStartedAt: 0,
     segmentEndedAt: 0,
@@ -649,13 +691,14 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     if (outgoing.length === 0) return fail('failed', 'The audio is too short to separate into speakers.');
 
     // `active !== run` is the ENTIRE guard on all three handlers, and a
-    // `run.settled` read alongside it would be unkillable code pretending to
-    // cover a window that does not exist: the `finally` below sets `settled`,
-    // unsubscribes and nulls `active` in one synchronous block with no yield
-    // between them, so no event can be dispatched into a handler after this
-    // run settled and before `active` stopped being it. A listener that
-    // somehow outlived its unsubscribe meets the same guard: it closes over
-    // THIS run, and `active` is by then null or the next one.
+    // settled-flag read alongside it would be unkillable code pretending to
+    // cover a window that does not exist: the `finally` below unsubscribes and
+    // nulls `active` in one synchronous block with no yield between them, so
+    // no event can be dispatched into a handler after this run settled and
+    // before `active` stopped being it — which is why this module carries no
+    // such flag at all. A listener that somehow outlived its unsubscribe meets
+    // the same guard: it closes over THIS run, and `active` is by then null or
+    // the next one.
     unsubscribers.push(
       bridge.onDiarizeProgress((p) => {
         if (active !== run) return; // chatter from a superseded run is dropped
@@ -806,6 +849,25 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
       req.onProgress
     );
 
+    // D5: the assembly runs BEHIND that label, after a yield. Published and
+    // assembled in one synchronous stretch, the event is emitted in the right
+    // order and never reaches a screen — the bar sits at 100 % under
+    // "Comparing voices" while the main thread blocks in the clusterer, which
+    // is the whole defect `vocalChain.ts`'s `announceMeasuring` was written
+    // for. Gated on the callback for that function's reason (:2135-2153): a
+    // frame is real work, and a caller with no progress callback has no label
+    // on screen to paint behind.
+    if (req.onProgress) {
+      await yieldToPaint();
+      // That frame is a real window with the dialog's Cancel live in it, and
+      // the read at the invoke's return is by now a whole task old. Without
+      // this second read a Cancel pressed during the paint comes back as a
+      // finished run the review panel offers to Land. It is deliberately
+      // inside the gate: with no yield, nothing can have changed `cancelled`
+      // since that first read, and the guard would be unkillable.
+      if (run.cancelled) return fail('cancelled', CANCELLED_MESSAGE);
+    }
+
     const evidence: DiarizationEvidence = {
       totalSamples16k: run.totalSamples16k,
       windows,
@@ -834,7 +896,6 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     showFailure(message);
     return fail('failed', message);
   } finally {
-    run.settled = true;
     for (const off of unsubscribers) off();
     run.windows = new Map();
     run.embeddings = [];
