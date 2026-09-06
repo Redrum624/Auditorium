@@ -546,7 +546,7 @@ export function speakersSessionName(sourceName: string): string {
  * source's single channel would understate a mono landing by half.
  *
  * D4's worked example: a 15-minute 44.1 kHz stereo source gives 317,520,000 B
- * per speaker (~318 MB), i.e. ~1.9 GB at N = 6.
+ * per speaker (317.5 MB), i.e. ~1.9 GB at N = 6.
  */
 export function speakerDocumentBytes(output: StemSeparationOutput): number {
   const channels = output.channelCount === 1 ? 2 : output.channelCount;

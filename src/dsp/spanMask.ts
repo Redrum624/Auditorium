@@ -19,8 +19,9 @@
  * The number is the bound `remixRender.ts` documents (`remixRender.ts:210-219`):
  * ~10 ms is where a fade-out becomes audible as a level change. That is a
  * documented figure rather than something this app went out and measured — the
- * repo's other borrowers of it read it the same way (`stemPartition.ts:73`:
- * "That is the documented bound") — and it marks where audibility BEGINS: 10 ms
+ * repo's other borrower of it says as much in its own words (`silenceDetect.ts`
+ * opens with "remixRender.ts documents the two anchors") — and it marks where
+ * audibility BEGINS: 10 ms
  * is the first length that reads as a level change, not the last one that does
  * not. So this constant sits exactly AT that bound rather than short of it, and
  * that is a deliberate trade worth naming rather than a number to hide behind.
@@ -32,7 +33,10 @@
  * joins two stretches of room tone across a splice, this one takes speech to
  * silence), which is why they stay separate constants; they land on the same
  * anchor, so the value here agrees with shipped code instead of standing on its
- * own. What it buys: the
+ * own. They do not read that anchor the same way: the sibling treats it as a
+ * ceiling and sits beneath it, while this module takes the same line to be
+ * where the level change starts to register and sits ON it. What agrees is the
+ * number, not the reading of it. What it buys: the
  * step being removed here is full-scale, and speech cut mid-syllable is a
  * harder edge than the tail overflow `remixRender` tapers, so the 2 ms that
  * costs nothing musically there is still a perceptible edge here. What it
@@ -180,7 +184,11 @@ export function keepSpans(
   const out = channels.map(() => new Float32Array(length));
   if (length === 0 || out.length === 0) return out;
 
-  const fadeLen = edgeFadeSamples(sampleRate);
+  // Floored at the shortest real ramp: `edgeFadeSamples` is a function of the
+  // document's rate, and under ~250 Hz it would return 1 or 2 — the [0, 1] step
+  // this module exists to remove (see {@link MIN_EDGE_RAMP_SAMPLES}). The floor
+  // is what lets the merge point below take `fadeLen` without a guard of its own.
+  const fadeLen = Math.max(MIN_EDGE_RAMP_SAMPLES, edgeFadeSamples(sampleRate));
   for (const { startSample, endSample } of mergeSpans(spans, length)) {
     const span = endSample - startSample;
     // Below two whole ramps there is no fade to compress, so the span stays

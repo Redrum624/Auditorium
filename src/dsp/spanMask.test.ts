@@ -127,9 +127,9 @@ describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender do
     // remixRender states ~10 ms flatly, with no source of its own; the one
     // figure it marks as measured inside the very lines cited here belongs to a
     // DIFFERENT claim (the 1-2 sample cliff, "measured at 27x the material's own
-    // slew"). The repo's other borrowers of the same number say so plainly —
-    // `stemPartition.ts:73` calls its own figure "the documented bound" — so
-    // this header may not upgrade a documented rule of thumb into the app's own
+    // slew"). The repo's other borrower of the same number says so plainly —
+    // `silenceDetect.ts:71` opens "remixRender.ts documents the two anchors" —
+    // so this header may not upgrade a documented rule of thumb into the app's own
     // measurement of speech-edge audibility, nor claim it is the only one there
     // is (`silenceDetect.ts` answered a neighbouring question with it already).
     const text = prose(source);

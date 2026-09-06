@@ -1041,7 +1041,11 @@ describe('the per-frame vote across a window boundary', () => {
    * two rules agree inside a window and only the accumulation across the
    * boundary is under test — a cluster two windows hear at the same global
    * frame must score TWO, and the frame where two windows meet is exactly
-   * where a botched `start` offset or a per-window stamp would eat one.
+   * where a botched `start` offset, or a saturation stamp not cleared between
+   * windows (the rule `0a2ecf1` removed from `assembleLabels`), would eat one.
+   * A PER-WINDOW stamp does not: replayed against this fixture it reproduces
+   * the shipped counts on every frame, which is why the discrimination of that
+   * rule lives in "the per-frame vote inside one window" and not here.
    *
    * The fixture is a three-way overlap at frame 59 = `windowStartFrame(1)`,
    * which the model cannot express (`powerset_max_classes` is 2), so the two

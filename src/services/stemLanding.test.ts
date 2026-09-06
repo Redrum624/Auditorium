@@ -1364,7 +1364,8 @@ describe('D4 the speaker landing’s memory budget', () => {
     } as StemSeparationOutput;
     const bytes = speakerDocumentBytes(fifteenMinutes);
     expect(bytes).toBe(317_520_000);
-    // D4: "317 MB each; 1.9 GB at N = 6" — and six of them are over budget.
+    // D4: "317,520,000 B, i.e. 317.5 MB each; 1.9 GB at N = 6" — and six of
+    // them are over budget. 318 is that figure to the nearest whole MB.
     expect(Math.round(bytes / 1e6)).toBe(318);
     expect(Math.round((6 * bytes) / 1e8) / 10).toBe(1.9);
     expect(6 * bytes).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
