@@ -5,6 +5,50 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Separate Voice lands one track per speaker.** `Pipeline → Separate Voice`
+  now runs three stages instead of one: the existing HT-Demucs separation, then
+  speaker segmentation (pyannote-segmentation-3.0, 10 s windows shifted by 1 s)
+  and speaker embedding (WeSpeaker ResNet34-LM with per-utterance mean
+  subtraction) in a new utility process, then clustering and assembly in the
+  renderer. A **confirmation step** shows the count it found, each speaker's
+  speech time and share, and the memory a landing would take — nothing lands
+  until you press Land, and changing the count re-groups the measurements
+  already taken with no second model run. Landing produces `<name> — Speaker 1
+  … Speaker N` plus `<name> — Backing`; each speaker track is the full-length
+  voice with the other speakers' turns silenced and 10 ms fades at every edge.
+  A count of one lands exactly the Voice + Backing result it always did.
+  Measured on four test recordings (~162 s, three two-speaker and one
+  four-speaker): the count was right on all four, both from clean speech and
+  through the separation the tool runs first —
+  `docs/bench/diarize-bench-baseline.json`, and the limits are printed in the
+  panel. The two models are one 32.5 MB download, offered beside the 166 MB
+  separation model. Speaker tracks carry no exact-sum claim: the fades remove a
+  little audio at every turn and overlapping speech is written into both
+  speakers' tracks. New: `src/dsp/diarization.ts`, `electron/diarizeHost.cjs`,
+  `electron/diarizeManager.cjs`, `src/services/diarizeService.ts`,
+  `scripts/diarize-bench.cjs`, `scripts/fetch-diarization-assets.cjs`; changed:
+  `src/components/Dialogs/SeparateDialog.tsx`, `src/services/stemLanding.ts`,
+  `electron/main.cjs`, `electron/preload.cjs`.
+
+### Changed
+
+- **The Separate Voice time estimate and its progress bar now carry the
+  measured stage rates.** The two seeds behind them were re-derived from
+  `docs/bench/diarize-bench-baseline.json` on an idle machine — segmentation 10
+  ms and embedding 75 ms per audio second, replacing 8 and 55 taken from an
+  early spike that had timed a *different* embedder (CAM++, which this feature
+  does not ship). The weighted bar hands Demucs 88.6 % of the run instead of
+  91.3 %. Affects: `src/services/diarizeService.ts`.
+- **The speaker landing's memory gate prices the Backing document too.** A
+  landing allocates N speaker documents *plus* a full-length Backing, so the
+  panel now quotes and refuses on (N + 1) × the document size — at 15 minutes
+  of 44.1 kHz stereo that is 952.6 MB for two speakers, not 635.0 MB. Affects:
+  `src/components/Dialogs/SeparateDialog.tsx`, `src/services/stemLanding.ts`.
+
 ## [1.38.0] - 2026-09-05
 
 The edit line becomes the thing everything aims at — zoom and Play both — plus

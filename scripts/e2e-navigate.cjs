@@ -2265,6 +2265,27 @@ async function main() {
           opened.overlays === 0,
           `…with no backdrop over the stage (${opened.overlays} overlays)`
         );
+        // D5 — the door is only the right door if the room behind it says what
+        // this release changed. `voice.separate` kept its command id, its label
+        // and its Pipeline row through v1.39, so nothing the walk asserts ABOUT
+        // THE ROW could tell the two-track voice split from the speaker split
+        // that replaced it. The first sentence the hosted tool shows is what
+        // can: it now promises one track per speaker.
+        if (commandId === 'voice.separate') {
+          const produces = await page.evaluate(() => {
+            const e = document.querySelector('[data-testid="separate-produces"]');
+            // JSX wraps the paragraph across source lines; the pin is the
+            // sentence, not the component's line breaks.
+            return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+          });
+          assert(
+            produces !== null &&
+              produces.startsWith('One track per speaker plus Backing.') &&
+              produces.includes('each speaker'),
+            `“${title}” opens the SPEAKER split — its own copy names one track per speaker, not ` +
+              `the two-track voice split it replaced (${JSON.stringify(produces)})`
+          );
+        }
         await closeHostedTool(page);
         await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
         record(`Pipeline > ${title}`, 'opened hosted from the card and closed back to it', 'PASS');

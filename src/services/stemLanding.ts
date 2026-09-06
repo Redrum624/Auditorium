@@ -90,6 +90,7 @@
  * hold.
  */
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
+import { keepSpans, type SampleSpan } from '../dsp/spanMask';
 import { createClip, createTrack, type Session, type Track } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { clearSessionHistory } from '../multitrack/sessionUndo';
@@ -170,7 +171,16 @@ export interface StemDocumentsResult {
   /**
    * Whether mixing the untouched session down reproduces the source exactly.
    * `false` when `sourcePeak > 1`: the master bus's ±1 clamp flat-tops the sum
-   * (see the module header). `null` when it could not be determined.
+   * (see the module header).
+   *
+   * `null` in TWO cases, and a caller must not read the second as the first:
+   * the verdict could not be determined (`sourcePeak` is `null` — the source
+   * document was closed), OR the landing makes no exact-sum claim at all.
+   * `landSpeakers` (D4) is the second: its documents are not a partition of the
+   * source — the edge fades remove audio and an overlapping turn is carried
+   * twice — so it returns `null` with a perfectly good `sourcePeak` beside it.
+   * `null` therefore does NOT imply `sourcePeak === null`, and a UI that
+   * explains this field must say "no claim", not "the check could not be made".
    */
   exactSumHolds: boolean | null;
 }
@@ -205,7 +215,16 @@ export interface StemLandingResult {
   /**
    * Whether mixing the untouched session down reproduces the source exactly.
    * `false` when `sourcePeak > 1`: the master bus's ±1 clamp flat-tops the sum
-   * (see the module header). `null` when it could not be determined.
+   * (see the module header).
+   *
+   * `null` in TWO cases, and a caller must not read the second as the first:
+   * the verdict could not be determined (`sourcePeak` is `null` — the source
+   * document was closed), OR the landing makes no exact-sum claim at all.
+   * `landSpeakers` (D4) is the second: its documents are not a partition of the
+   * source — the edge fades remove audio and an overlapping turn is carried
+   * twice — so it returns `null` with a perfectly good `sourcePeak` beside it.
+   * `null` therefore does NOT imply `sourcePeak === null`, and a UI that
+   * explains this field must say "no claim", not "the check could not be made".
    */
   exactSumHolds: boolean | null;
 }
@@ -480,4 +499,143 @@ export function landVoice(output: StemSeparationOutput): StemLandingResult {
     voiceSessionName(output.sourceName)
   );
   return { ...documents, ...session };
+}
+
+/**
+ * D4 — the track/document labels a speaker landing uses: `Speaker 1 … Speaker
+ * N`, then `Backing` LAST.
+ *
+ * The speakers come first for the same reason Voice does in
+ * {@link VOICE_TRACK_LABELS}: they are the headline output, and the Backing is
+ * what is left once they are taken away. The order carries NO arithmetic here —
+ * `landStems`' Residual-last rule exists because mixdown replays the
+ * partition's accumulation order, and there is no exact-sum identity to protect
+ * for speakers (see {@link landSpeakers}).
+ *
+ * These strings are the document-name suffixes as well as the track names, so
+ * the two can never disagree: `<source> — Speaker 1`, `<source> — Backing`.
+ */
+export function speakerTrackLabels(speakerCount: number): string[] {
+  const labels: string[] = [];
+  for (let i = 1; i <= speakerCount; i++) labels.push(`Speaker ${i}`);
+  labels.push('Backing');
+  return labels;
+}
+
+/**
+ * D4 — name given to the session Separate Speakers lands: `<source> — Speakers`.
+ *
+ * Like {@link voiceSessionName}, deliberately NOT a name any of the documents
+ * already carries (`Speaker 1`, `Backing`): the session name is also the
+ * default filename for the project save, and two different things sharing one
+ * name in a window is how a user overwrites the wrong one.
+ */
+export function speakersSessionName(sourceName: string): string {
+  return `${sourceName} — Speakers`;
+}
+
+/**
+ * D4 — the renderer memory a SINGLE speaker document occupies, in bytes.
+ *
+ * A speaker track is the full-length stem with the other speakers' turns
+ * zeroed, not a trimmed excerpt: silence costs exactly what audio costs, so the
+ * price of N speakers is N × this, on top of the Backing and everything already
+ * open. Measured against the shipped channel layout, which is the LANDED
+ * document's — a mono source is widened to dual-mono by `documentChannels` (see
+ * the module header), so its documents cost two channels too, and counting the
+ * source's single channel would understate a mono landing by half.
+ *
+ * D4's worked example: a 15-minute 44.1 kHz stereo source gives 317,520,000 B
+ * per document (317.5 MB). A landing is N + 1 of them — {@link landSpeakers}
+ * builds the Backing at the same full length as every speaker — so the price
+ * is ~1.9 GB of speaker tracks at N = 6 and ~2.2 GB in total. The N + 1 is the
+ * figure the dialog prices and gates on; counting only the speakers passed a
+ * landing half as large again as its own ceiling.
+ */
+export function speakerDocumentBytes(output: StemSeparationOutput): number {
+  const channels = output.channelCount === 1 ? 2 : output.channelCount;
+  return output.lengthSamples * channels * 4;
+}
+
+/**
+ * D4 — the ceiling the DIALOG refuses a landing above, in bytes: a landing
+ * whose N speaker documents PLUS its Backing exceed this combined
+ * {@link speakerDocumentBytes} is not landed, and the user is told the figure
+ * and asked to pick fewer speakers or trim the source. The Backing counts
+ * because {@link landSpeakers} allocates it, full length, alongside the
+ * speakers — the gate prices what the landing builds, not a subset of it.
+ *
+ * The same order as the transcribe host's stated envelope. It is a gate on the
+ * button, not a rule this module enforces: nothing here truncates a document,
+ * drops a speaker, or silently lands less than it was asked for — a landing
+ * that is over budget still lands in full if a caller asks for it, because a
+ * landing that quietly loses a speaker is worse than one that is refused out
+ * loud.
+ */
+export const SPEAKER_LANDING_BUDGET_BYTES = 1_200_000_000;
+
+/**
+ * D4 — Separate Speakers: the same separation run as {@link landVoice}, with
+ * the Voice track split across the speakers the diarizer found.
+ *
+ * `docSpans[k]` is speaker k's turns in DOCUMENT samples (what
+ * `segmentsToDocSamples` produces). Speaker k's document is the FULL Vocals
+ * stem with every sample outside those spans taken to silence and each kept
+ * span faded at its edges — `keepSpans`, whose header explains the 10 ms ramp.
+ * `<source> — Backing` is the same sum `landVoice` lands, unchanged.
+ *
+ * WHAT THIS LANDING DOES NOT CLAIM. The speaker tracks plus the Backing do NOT
+ * reconstruct the source sample for sample, and this module says so rather than
+ * carrying a tolerance: the edge fades remove a little audio at every turn, and
+ * a region where two speakers overlap is carried by BOTH of their documents, so
+ * it is present twice on the mix bus. `landStems`' exact-sum guarantee and
+ * `landVoice`'s measured 4.32e-7 both belong to partitions of the source; a
+ * speaker split is not one. The Backing on its own still adds back to the
+ * source as it always did — that half is untouched.
+ *
+ * That is why the result's `exactSumHolds` is `null` here and not the
+ * peak-derived verdict every other landing returns (D4: "No exact-sum claim for
+ * speakers"). `null` is the field's own "no claim in either direction" value —
+ * the one S5's dialog renders as silence — and it is the only honest answer: a
+ * `true` earned by an in-range source peak would promise an identity this
+ * landing never had, while `false` would blame the master bus's ±1 clamp for a
+ * difference the fades and the shared overlap cause. `sourcePeak` is still
+ * reported, because that IS a fact about the source.
+ *
+ * A confirmed count of ONE is `landVoice`, not a one-speaker mask: the whole
+ * stem lands as `Voice`, unmasked and by reference, because there is nobody to
+ * separate it from and the fades would only shave the edges off the user's own
+ * speech. Zero span arrays take the same route — D5's "no distinct speakers
+ * were found — the voice will land as one track".
+ *
+ * Everything else is `landVoice`'s behaviour verbatim, through the same two
+ * halves: unsaved documents carrying the source's beat-grid provenance, Speaker
+ * 1 active, a fresh session at the output rate with one full-length clip per
+ * track, the previous session and its undo history dropped, and the multitrack
+ * view.
+ */
+export function landSpeakers(
+  output: StemSeparationOutput,
+  docSpans: readonly (readonly SampleSpan[])[]
+): StemLandingResult {
+  if (docSpans.length <= 1) return landVoice(output);
+
+  // Selected by LABEL, exactly as `landVoice` does and for the same reason (see
+  // its comment): `stemService` swaps Vocals out of the host's own order.
+  const vocals = output.stems.find((s) => s.label === 'Vocals')?.channels ?? [];
+  const labels = speakerTrackLabels(docSpans.length);
+  const documents = createLandingDocuments(output, labels, [
+    ...docSpans.map((spans) => keepSpans(vocals, spans, output.sampleRate)),
+    backingChannels(output),
+  ]);
+  const session = buildLandingSession(
+    output,
+    documents.documentIds,
+    labels,
+    speakersSessionName(output.sourceName)
+  );
+  // The verdict `createLandingDocuments` measures is about a PARTITION of the
+  // source, which this landing is not (see the docblock): it is overridden to
+  // "no claim", never inherited.
+  return { ...documents, ...session, exactSumHolds: null };
 }

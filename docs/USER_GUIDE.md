@@ -1397,6 +1397,56 @@ complement of Voice, **any separation artefact in the Voice appears inverted in
 the Backing** — a syllable the model over-grabbed is missing from the bed by
 exactly as much as it is present in the voice.
 
+#### When more than one person is talking
+
+If the recording has several voices, **Separate Voice** can land **one track per
+speaker** plus the Backing. It is the same command — the tool works out how many
+people it heard and asks you before anything lands.
+
+What happens when you press **Separate**:
+
+1. **The separation** — HT-Demucs, exactly as above, at about 1.5× realtime.
+   This is the long stage, roughly nine tenths of the run.
+2. **Listening for speakers** — a 6 MB segmentation model walks the voice in
+   10-second windows and marks who is talking where.
+3. **Comparing voices** — a 26.5 MB embedding model measures each turn and the
+   turns are grouped into speakers. Both models are one download of **32.5 MB**,
+   offered beside the 166 MB separation model the first time you run this.
+
+Then the tool stops and shows you what it found: **"Found 3 speakers"**, each
+speaker's speech time and share, the size a landing would take, and a
+**Speakers** control. Nothing has landed yet. If the count looks wrong, change
+it — the regrouping is instant, because the measurements are kept and only the
+grouping is redone. Press **Land 3 speakers + Backing** to accept, or **Close**
+to walk away with your session untouched.
+
+**What a speaker track holds.** Every speaker track is the *whole* voice stem at
+full length with everything outside that speaker's turns taken to silence, each
+kept turn faded in and out over 10 ms so the edges do not click. Where two
+people talk at once, that audio appears in **both** their tracks. So the speaker
+tracks plus Backing do **not** add back up to your original sample for sample —
+the fades remove a little at every turn and the overlaps are counted twice. The
+Backing on its own still adds back exactly as it always did. If you need the
+exact reconstruction, use one of the other two landings.
+
+**Export a speaker rather than saving the project.** A speaker track is a
+full-length copy of the voice, so N speakers cost N + 1 full-length documents
+(the Backing is one too). For a 15-minute 44.1 kHz stereo recording that is
+**317.5 MB each** — 952.6 MB for two speakers, 1.3 GB for three — and the panel
+prints the figure before you land, refusing a landing above 1.2 GB with the
+number in hand. Those documents have never been written to disk, so a project
+save writes every one of them into the project file. Export the speakers you
+want (**File → Export**) and close the rest instead.
+
+**What the count was measured on.** Four test recordings, about 162 seconds in
+total: three with two speakers and one with four. The count was right on all
+four, both from clean speech and through the separation this tool runs first.
+That is the whole of the evidence — no measurement of *which* turn belongs to
+whom, one four-speaker recording and it is in Mandarin under an English-trained
+model, and almost no overlapping speech in the material. Recordings with many
+short turns or heavy crosstalk were not in that set. The count is a control for
+exactly that reason.
+
 ### Transcribing speech
 
 To turn speech into timestamped text with a speaker label per segment:

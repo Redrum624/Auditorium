@@ -53,6 +53,7 @@ import { isProjectSaveInFlight } from './multitrack/sessionFile';
 import { getRemixSession, useRemixVersion } from './services/remixService';
 import { getStemBusyCount } from './services/stemService';
 import { getTranscribeBusyCount } from './services/transcribeService';
+import { getDiarizeBusyCount } from './services/diarizeService';
 import { getVoiceBusyCount } from './services/voiceService';
 import { getAlignBusyCount } from './services/alignLyricsService';
 import { registerEffectCommands } from './services/menuActions';
@@ -538,6 +539,7 @@ export default function App() {
           (isProjectSaveInFlight() ? 1 : 0) +
           getStemBusyCount() +
           getTranscribeBusyCount() +
+          getDiarizeBusyCount() +
           getVoiceBusyCount() +
           getAlignBusyCount()
       );

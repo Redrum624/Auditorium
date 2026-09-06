@@ -11,7 +11,13 @@
  * what an escaped `Int32Array`/`Float32Array` is).
  */
 
-import { installTestHooks, type TestApi } from './testHooks';
+import {
+  installTestHooks,
+  peakOutsideSpans,
+  syntheticSpeakerEvidence,
+  HOOK_TURN_FRAMES,
+  type TestApi,
+} from './testHooks';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
@@ -38,6 +44,31 @@ import {
   FALLBACK_SESSION_LANE_WIDTH,
   _resetSessionLaneWidth,
 } from '../multitrack/sessionViewport';
+import {
+  assembleDiarization,
+  assembledFrameCount,
+  expectedWindowCount,
+  frameToSample16k,
+  segmentsToDocSamples,
+  FRAME_SHIFT,
+  MIN_CLUSTER_SIZE,
+  MIN_EMBED_FRAMES,
+  MODEL_SAMPLE_RATE,
+  SEG_FRAMES,
+  SEG_SHIFT,
+  SEG_WINDOW,
+} from '../dsp/diarization';
+import * as spanMask from '../dsp/spanMask';
+import { cancelDiarization, modelLength16k } from './diarizeService';
+import {
+  classWindow,
+  installDiarizeBackend,
+  speakerVector,
+  uninstallDiarizeBackend,
+  WIRE_MODEL_BYTES,
+  WIRE_WINDOW_FRAMES,
+  type DiarizeBackend,
+} from '../__mocks__/diarizeBackend';
 
 function api(): TestApi {
   installTestHooks();
@@ -1313,5 +1344,959 @@ describe('getPlaybackState (D2)', () => {
       positionSample: 0,
       cursorSample: 0,
     });
+  });
+});
+
+/**
+ * D6 — `separateSpeakersLand`, the Separate Speakers landing WITHOUT either
+ * model.
+ *
+ * Same bargain as `separateVoiceLand` above, one stage further along: the smoke
+ * cannot run HT-Demucs AND the two diarization models (198 MB, minutes of CPU)
+ * to watch three tracks land. So the hook synthesises BOTH halves — the exact
+ * four-stem partition of the active document, and the evidence a diarization
+ * host would have produced for two speakers taking strict turns across it — and
+ * hands them to the shipped `assembleDiarization` -> `segmentsToDocSamples` ->
+ * `landSpeakers` chain. What is asserted here is therefore that chain, which is
+ * the part D4 added, plus the hook's own JSON contract.
+ */
+describe('separateSpeakersLand (D4/D6)', () => {
+  /** 16 kHz samples a document of `seconds` at 44.1 kHz resamples to — the rate
+   *  pair divides exactly (44100 / 16000 = 2.75625), so no rounding argument is
+   *  needed to say which windows the fixture produces. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  /** The worst |sample| over a document's channels. The expected peaks below
+   *  are derived from the FIXTURE through this rather than written down: the
+   *  source's own peak, times the stem weight the landing carries. */
+  const peakOf = (channels: readonly Float32Array[]): number => {
+    let peak = 0;
+    for (const ch of channels) {
+      for (let i = 0; i < ch.length; i++) if (Math.abs(ch[i]) > peak) peak = Math.abs(ch[i]);
+    }
+    return peak;
+  };
+
+  /** `syntheticSeparation`'s Vocals weight (`testHooks.ts`), the one stem a
+   *  speaker document is made of. Written out HERE on purpose rather than
+   *  imported: pinning the number the fixture is supposed to use is what makes
+   *  a permutation of those four weights — the wrong-stem landing the fixture's
+   *  docblock names — fail instead of landing quietly. */
+  const VOCALS_WEIGHT = 0.19;
+
+  /** Distinct, non-trivial content per channel, as `addVoiceDoc` above: a
+   *  landing measured on silence would pass with the mask inverted.
+   *
+   *  Channel 1 is the LOUDER side on purpose (a bigger amplitude AND the
+   *  offset that adds to its own troughs): both measurements the summary
+   *  reports — `channelsPeak` and `peakOutsideSpans` — take a max over EVERY
+   *  channel, and on a fixture where channel 0 dominates, a loop that never
+   *  left channel 0 would produce the same numbers. With the peak living on
+   *  channel 1, every expectation below is derived from a sample the
+   *  measurement can only reach by scanning both.
+   *
+   *  `rate` is a parameter and not the constant for the same reason: the hook
+   *  hands the ACTIVE document's rate to both halves of the chain, and at
+   *  44.1 kHz a hardcoded 44100 in either of them is the identity. One fixture
+   *  below is 48 kHz so that neither can be. */
+  function addSpeakerDoc(
+    name = 'talk.wav',
+    samples = 2 * 44100,
+    channelCount = 2,
+    rate = 44100
+  ): AudioDocument {
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const ch = new Float32Array(samples);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] =
+          (0.4 + 0.06 * c) * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / rate) +
+          (c === 0 ? 0.05 : -0.03);
+      }
+      channels.push(ch);
+    }
+    const doc = createDocument({ name, sampleRate: rate, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  /** Frames `syntheticSpeakerEvidence` assembles for a document of
+   *  `docLengthSamples` at `rate`: the service's own resampled length, through
+   *  the assembly's own window and cut arithmetic. Not a written-down number —
+   *  it is the quantity the two derivations below stand on. */
+  const fixtureFrameCount = (docLengthSamples: number, rate: number): number => {
+    const samples16k = modelLength16k(docLengthSamples, rate);
+    return assembledFrameCount(samples16k, expectedWindowCount(samples16k));
+  };
+
+  /** Seconds of assembled speech the fixture's timeline hands each voice.
+   *
+   *  `syntheticSpeakerEvidence` alternates the two voices every
+   *  HOOK_TURN_FRAMES frames, and every fixture in this describe is between
+   *  two and three turns long: voice 0 holds [0, T) and [2T, frames), voice 1
+   *  holds [T, 2T). The assembly closes an open final run at frame
+   *  `frames - 1` rather than one past it (`diarization.ts`), so voice 0's
+   *  tail is `frames - 1 - 2T` frames, and a frame is FRAME_SHIFT samples at
+   *  MODEL_SAMPLE_RATE. The two numbers therefore DIFFER, which is what a
+   *  summary reporting a constant array cannot produce. */
+  const expectedSpeechSeconds = (docLengthSamples: number, rate: number): [number, number] => {
+    const frames = fixtureFrameCount(docLengthSamples, rate);
+    const tailFrames = frames - 1 - 2 * HOOK_TURN_FRAMES;
+    return [
+      ((HOOK_TURN_FRAMES + tailFrames) * FRAME_SHIFT) / MODEL_SAMPLE_RATE,
+      (HOOK_TURN_FRAMES * FRAME_SHIFT) / MODEL_SAMPLE_RATE,
+    ];
+  };
+
+  /** The same timeline as document samples, per voice: the frame's 16 kHz
+   *  centre carried to the document's own clock and clamped to it, exactly as
+   *  `segmentsToDocSamples` maps it — but from the FRAMES, so the spans a
+   *  landing was masked with can be checked against a rate this file supplied
+   *  rather than against a second call at whatever rate the hook happened to
+   *  pass. */
+  const expectedTurnSpans = (
+    docLengthSamples: number,
+    rate: number
+  ): { startSample: number; endSample: number }[][] => {
+    const frames = fixtureFrameCount(docLengthSamples, rate);
+    const at = (frame: number): number =>
+      Math.min(docLengthSamples, Math.round((frameToSample16k(frame) * rate) / MODEL_SAMPLE_RATE));
+    return [
+      [
+        { startSample: at(0), endSample: at(HOOK_TURN_FRAMES) },
+        { startSample: at(2 * HOOK_TURN_FRAMES), endSample: at(frames - 1) },
+      ],
+      [{ startSample: at(HOOK_TURN_FRAMES), endSample: at(2 * HOOK_TURN_FRAMES) }],
+    ];
+  };
+
+  it('lands Speaker 1, Speaker 2 and Backing at a forced count of two', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.ok).toBe(true);
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.requestedSpeakerCount).toBe(2);
+    expect(summary.documentNames).toEqual([
+      'talk.wav — Speaker 1',
+      'talk.wav — Speaker 2',
+      'talk.wav — Backing',
+    ]);
+    expect(summary.trackNames).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+    expect(summary.sessionName).toBe('talk.wav — Speakers');
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(2 * 44100);
+    expect(useSessionStore.getState().session.tracks).toHaveLength(3);
+    expect(useAppStore.getState().view).toBe('multitrack');
+    // The routing flag on the side the mono test cannot reach: asserted only
+    // as `true` on a mono source it is the seed value of a field hardcoded to
+    // `true`, and a stereo landing that claimed dual-mono routing would look
+    // exactly like this one.
+    //
+    // `channelCounts` is deliberately NOT asserted here. This source is stereo
+    // and the mono fixture below is widened to stereo by the dual-mono routing,
+    // so both read [2, 2, 2] and a summary answering a hardcoded 2 per document
+    // would satisfy either. The field is pinned where it can fail instead — on
+    // the three-channel landing further down.
+    expect(summary.monoRoutedAsDualMono).toBe(false);
+    // D4: a speaker split is not a partition of the source, so the landing
+    // makes no exact-sum claim in either direction.
+    expect(summary.exactSumHolds).toBeNull();
+  });
+
+  it('a forced count of ONE is the Voice + Backing landing, not a one-speaker mask', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(1);
+
+    expect(summary.speakerCount).toBe(1);
+    expect(summary.documentNames).toEqual(['talk.wav — Voice', 'talk.wav — Backing']);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+    expect(summary.sessionName).toBe('talk.wav — Voice + Backing');
+    // Nothing was masked, so there is no "outside the spans" to measure — and
+    // `landVoice`'s own exact-sum verdict is a real one, not D4's "no claim".
+    expect(summary.outsideSpansPeak).toBeNull();
+    expect(summary.speakerPeaks).toEqual([]);
+    // The one field that DIFFERS between the two landings, so the count-of-two
+    // `toBeNull()` above is a contrast and not the seed value: `landVoice`
+    // reports the real peak-derived verdict (`createLandingDocuments`:
+    // `sourcePeak <= 1`), and the synthetic separation is an exact partition of
+    // a source whose own peak — channel 1's trough, just under 0.49, since that
+    // channel carries the larger amplitude AND the offset that deepens it
+    // (`addSpeakerDoc`) — sits well inside full scale.
+    expect(summary.exactSumHolds).toBe(true);
+  });
+
+  it('every speaker document is silent outside that speakers turns and carries audio inside them', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+
+    const summary = t.separateSpeakersLand(2);
+
+    // The two halves of the mask, and both are needed: a landing that zeroed
+    // the WHOLE document would also report 0 outside the spans.
+    //
+    // Inside the turns it is the VALUE that is pinned, not the sign. A speaker
+    // document is the Vocals stem of an exact partition of the source, so its
+    // peak is that weight times the source's own — measured off the fixture
+    // here. "> 0" passes on any constant at all, and it passes on a landing
+    // that took the wrong stem (0.37x, 0.23x or 0.11x).
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+    // That peak lives on channel 1 (see `addSpeakerDoc`), pinned here because
+    // it is what makes every expectation in this describe a number the
+    // measurement can only reach by scanning BOTH channels: hand the peak back
+    // to channel 0 and a `channelsPeak` that stopped after the first channel
+    // would report the same value again.
+    expect(peakOf([source.channels[1]])).toBeGreaterThan(peakOf([source.channels[0]]));
+    expect(summary.outsideSpansPeak).toBe(0);
+    expect(summary.speakerPeaks).toHaveLength(2);
+    for (const peak of summary.speakerPeaks) expect(peak).toBeCloseTo(stemPeak, 6);
+    // Turns, not one span each: the fixture alternates, so the first speaker
+    // gets two turns and the second one.
+    expect(summary.segmentCounts).toEqual([2, 1]);
+    // Seconds, not signs. "> 0" is satisfied by any constant array, including
+    // the one an unwired field would carry; these two numbers come off the
+    // timeline the fixture is BUILT from (HOOK_TURN_FRAMES, FRAME_SHIFT,
+    // MODEL_SAMPLE_RATE) and they differ from each other, because the first
+    // voice holds two turns and the second one.
+    const [firstVoice, secondVoice] = expectedSpeechSeconds(2 * 44100, 44100);
+    expect(secondVoice).toBeLessThan(firstVoice);
+    expect(summary.speechSeconds).toHaveLength(2);
+    expect(summary.speechSeconds[0]).toBeCloseTo(firstVoice, 9);
+    expect(summary.speechSeconds[1]).toBeCloseTo(secondVoice, 9);
+  });
+
+  it('measures what is outside the turns rather than reporting a zero of its own', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    const length = source.channels[0].length;
+
+    const summary = t.separateSpeakersLand(2);
+
+    // 0 is also the value the field would carry if the measurement had never
+    // run, so the measurement is put on BOTH sides of that identity: the same
+    // landed channels, with the spans moved off the audio. Speaker 1's document
+    // against speaker 2's turns holds every one of its samples OUTSIDE the
+    // spans and has to report its whole peak; against its own turns it has to
+    // report silence. The spans come from the shipped chain the hook itself
+    // runs, not from a hand-written list.
+    const spans = segmentsToDocSamples(
+      assembleDiarization(syntheticSpeakerEvidence(length, 44100), { speakerCount: 2 }),
+      44100,
+      length
+    );
+    const speaker1 = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'talk.wav — Speaker 1');
+    expect(speaker1).toBeDefined();
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+    expect(peakOutsideSpans(speaker1!.channels, spans[1])).toBeCloseTo(stemPeak, 6);
+    expect(peakOutsideSpans(speaker1!.channels, spans[0])).toBe(0);
+    expect(summary.outsideSpansPeak).toBe(0);
+  });
+
+  it('reads the head, the gaps between the spans and the tail, each on its own', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    const length = source.channels[0].length;
+
+    t.separateSpeakersLand(2);
+
+    // Three regions lie outside a span set — the head, the gaps and the tail —
+    // and the shipped hook leans on ALL THREE: it measures speaker k against
+    // speaker k's OWN turns, so the places that have to read 0 are the head
+    // before that speaker's first turn, the gaps between its turns and the tail
+    // after its last. The two voices of this fixture divide that between them:
+    // speaker 1 has two turns and the second reaches the document's end, so it
+    // brings head + gap and an EMPTY tail; speaker 2 has one turn and therefore
+    // no gap at all, so its whole evidence is head + tail. Handed one span set
+    // the three are interchangeable (this fixture reaches the same peak in
+    // each), so each is isolated here by a span set that leaves only that one
+    // region uncovered. A measurement that dropped two of the three would still
+    // answer the test above; it cannot answer all four of these.
+    const spans = segmentsToDocSamples(
+      assembleDiarization(syntheticSpeakerEvidence(length, 44100), { speakerCount: 2 }),
+      44100,
+      length
+    );
+    expect(spans[0]).toHaveLength(2);
+    const [firstTurn, secondTurn] = spans[0];
+    const speaker1 = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'talk.wav — Speaker 1');
+    expect(speaker1).toBeDefined();
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+
+    // HEAD alone: one span from the end of the first turn to the end of the
+    // document — no gap, an empty tail, and the first turn's audio entirely
+    // before it.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: firstTurn.endSample, endSample: length },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // GAP alone: two spans that reach the document's own ends, so head and tail
+    // are empty by construction and the first turn lies between them.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: 0, endSample: firstTurn.startSample },
+        { startSample: firstTurn.endSample, endSample: length },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // TAIL alone: one span from 0 to the start of the second turn, which is
+    // then the only audio left uncovered.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: 0, endSample: secondTurn.startSample },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // And 0 when the whole document is covered — the contrast that makes the
+    // three numbers above region measurements rather than the document's peak.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [{ startSample: 0, endSample: length }])
+    ).toBe(0);
+  });
+
+  it('answers for span sets the shipped caller never sends: unsorted, nested, and at the last sample', () => {
+    // `peakOutsideSpans` promises head/gaps/tail for the span set it is HANDED,
+    // and two of the lines that make that true for an arbitrary set are
+    // unreachable from `separateSpeakersLand` — `segmentsToDocSamples` always
+    // hands it spans already sorted, disjoint and clamped to the document. They
+    // are pinned here instead, each on a fixture whose LOUD sample lies INSIDE a
+    // span, so the mutant reports that sample and the real code the quieter one
+    // outside it.
+
+    // UNSORTED, the later span first. Without the sort the scan runs [0, 20),
+    // which swallows the 0.9 that {0, 10} covers.
+    const unsorted = new Float32Array(40);
+    unsorted[5] = 0.9; // inside {0, 10}
+    unsorted[15] = 0.3; // the one gap — the answer
+    unsorted[25] = 0.8; // inside {20, 30}
+    unsorted[35] = 0.2; // the tail
+    expect(
+      peakOutsideSpans(
+        [unsorted],
+        [
+          { startSample: 20, endSample: 30 },
+          { startSample: 0, endSample: 10 },
+        ]
+      )
+    ).toBeCloseTo(0.3, 6);
+
+    // NESTED: {10, 20} sits inside {0, 100}, so a cursor that took every span's
+    // end unconditionally would walk BACK to 20 and re-read [20, 100) — which
+    // is covered — as though it were the tail.
+    const nested = new Float32Array(120);
+    nested[50] = 0.7; // inside {0, 100}
+    nested[110] = 0.25; // the tail — the answer
+    expect(
+      peakOutsideSpans(
+        [nested],
+        [
+          { startSample: 0, endSample: 100 },
+          { startSample: 10, endSample: 20 },
+        ]
+      )
+    ).toBeCloseTo(0.25, 6);
+
+    // The tail's own boundary, at the value and one step past it: a span ending
+    // at the LAST sample leaves that sample outside, and one ending at
+    // `ch.length` covers it.
+    const edge = new Float32Array(40);
+    edge[39] = 0.6;
+    expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 39 }])).toBeCloseTo(0.6, 6);
+    expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 40 }])).toBe(0);
+
+    // A span that starts AT the last sample's end and one that starts PAST it.
+    // `segmentsToDocSamples` clamps both edges to the document length, so the
+    // shipped caller never sends either — but the head scan runs to the span's
+    // own start rather than to a clamped one, so the loop reads past the array
+    // and the function's docblock rests on what those reads do: `undefined`,
+    // `Math.abs` of that is NaN, and `NaN > outside` is false, so the running
+    // peak keeps the in-bounds answer. Pinned at `ch.length`, where the scan
+    // stops exactly at the end and reads nothing out of range, and one step
+    // past it, which is the first start that reads one — so a
+    // `Math.max(outside, v)` running peak, the same loop written the other way
+    // round, still answers 0.45 for the first and NaN for the second.
+    const past = new Float32Array(40);
+    past[7] = 0.45;
+    expect(peakOutsideSpans([past], [{ startSample: 40, endSample: 50 }])).toBeCloseTo(0.45, 6);
+    expect(peakOutsideSpans([past], [{ startSample: 41, endSample: 50 }])).toBeCloseTo(0.45, 6);
+  });
+
+  it('reads the ACTIVE documents rate on both sides of the chain — a 48 kHz source', () => {
+    const t = api();
+    // Every other fixture here is 44.1 kHz, and the hook hands the active
+    // document's rate to BOTH halves of the chain: to `syntheticSpeakerEvidence`
+    // (which resamples the length to 16 kHz) and to `segmentsToDocSamples`
+    // (which carries the assembled spans back to the document's clock). At
+    // 44.1 kHz a hardcoded 44100 in either call is the identity. This source is
+    // 48 kHz, so neither can be.
+    const rate = 48000;
+    const length = 2 * rate;
+    const source = addSpeakerDoc('talk48.wav', length, 2, rate);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.sampleRate).toBe(rate);
+    expect(summary.lengthSamples).toBe(length);
+    expect(summary.segmentCounts).toEqual([2, 1]);
+    // The evidence side. The seconds each voice speaks are fixed by the
+    // TIMELINE, not by the document rate — but the frame count that timeline
+    // runs over comes from the 16 kHz length, which is what a hardcoded 44100
+    // would get wrong here (34,830 samples rather than 32,000, so the first
+    // voice's closing turn ends at a different frame).
+    const [firstVoice, secondVoice] = expectedSpeechSeconds(length, rate);
+    expect(summary.speechSeconds[0]).toBeCloseTo(firstVoice, 9);
+    expect(summary.speechSeconds[1]).toBeCloseTo(secondVoice, 9);
+
+    // The mapping side. The mask has to have kept THESE document samples, so a
+    // mapping computed at 44100 — every edge 8.1 % early and short — leaves
+    // audio outside them on both documents.
+    const [turnsOfOne, turnsOfTwo] = expectedTurnSpans(length, rate);
+    const docs = useAppStore.getState().documents;
+    const speaker1 = docs.find((d) => d.name === 'talk48.wav — Speaker 1');
+    const speaker2 = docs.find((d) => d.name === 'talk48.wav — Speaker 2');
+    expect(speaker1).toBeDefined();
+    expect(speaker2).toBeDefined();
+    expect(peakOutsideSpans(speaker1!.channels, turnsOfOne)).toBe(0);
+    expect(peakOutsideSpans(speaker2!.channels, turnsOfTwo)).toBe(0);
+    // ...and the other voice's turns are audio for this one, so the same
+    // measurement over the other span set has to report the stem's peak: the
+    // two 0s above are silence, not an empty scan.
+    expect(peakOutsideSpans(speaker1!.channels, turnsOfTwo)).toBeCloseTo(
+      Math.fround(VOCALS_WEIGHT * peakOf(source.channels)),
+      6
+    );
+    expect(summary.outsideSpansPeak).toBe(0);
+  });
+
+  it('reports the audio a mask leaves behind, which is what makes that 0 evidence', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    // The shipped mask always silences the gaps, so through this hook the field
+    // can only ever read 0 — and a summary that hard-coded the 0 would look the
+    // same. So the mask is TAKEN AWAY (`keepSpans` becomes a pass-through: the
+    // one thing D4's landing does to the stem) and the hook has to report the
+    // stem it was handed, outside the turns and all.
+    const spy = jest
+      .spyOn(spanMask, 'keepSpans')
+      .mockImplementation((channels) => channels.map((ch) => Float32Array.from(ch)));
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(spy).toHaveBeenCalled();
+    expect(summary.outsideSpansPeak).toBeCloseTo(
+      Math.fround(VOCALS_WEIGHT * peakOf(source.channels)),
+      6
+    );
+  });
+
+  it.each([0, 1])(
+    'aggregates over every speaker document, not one of them — speaker %i unmasked',
+    (unmasked) => {
+      const t = api();
+      const source = addSpeakerDoc('talk.wav');
+      // `outsideSpansPeak` is the worst sample over EVERY speaker document and
+      // `speakerPeaks` is one entry per document, and on this fixture the two
+      // landed documents are identical — so a loop that measured a single k
+      // would report exactly the same summary. One speaker's mask is therefore
+      // replaced by a HALF-GAIN pass-through (nothing silenced, and the turns
+      // themselves at half level): that document is then the only one carrying
+      // audio outside its turns AND the only one whose peak is not the stem's,
+      // so both fields can only be right if the run visited the k it landed at.
+      const real = spanMask.keepSpans;
+      let call = 0;
+      jest
+        .spyOn(spanMask, 'keepSpans')
+        .mockImplementation((channels, spans, sampleRate) =>
+          call++ === unmasked
+            ? channels.map((ch) => Float32Array.from(ch, (v) => v * 0.5))
+            : real(channels, spans, sampleRate)
+        );
+
+      const summary = t.separateSpeakersLand(2);
+
+      const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+      expect(summary.speakerPeaks).toHaveLength(2);
+      expect(summary.speakerPeaks[unmasked]).toBeCloseTo(stemPeak / 2, 6);
+      expect(summary.speakerPeaks[1 - unmasked]).toBeCloseTo(stemPeak, 6);
+      expect(summary.outsideSpansPeak).toBeCloseTo(stemPeak / 2, 6);
+    }
+  );
+
+  it('routes a MONO source as dual-mono across every landed track, and says so', () => {
+    const t = api();
+    addSpeakerDoc('mono.wav', 2 * 44100, 1);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.monoRoutedAsDualMono).toBe(true);
+    expect(summary.channelCounts).toEqual([2, 2, 2]);
+  });
+
+  it('carries a THREE-channel source through at its own width, on every document', () => {
+    const t = api();
+    // The two landings above cannot pin `channelCounts` between them: the
+    // stereo source lands two channels because that is its width, and the mono
+    // source lands two because dual-mono routing widens it, so [2, 2, 2] is the
+    // answer either way and `landed.map(() => 2)` passes both. This source is
+    // THREE channels wide — `documentChannels` (`stemLanding.ts`) copies only a
+    // MONO stem and hands anything else through — so the number can only be
+    // right if the summary reads it off each landed document.
+    const source = addSpeakerDoc('surround.wav', 2 * 44100, 3);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(source.channels).toHaveLength(3);
+    expect(summary.documentNames).toHaveLength(3);
+    expect(summary.channelCounts).toEqual([
+      source.channels.length,
+      source.channels.length,
+      source.channels.length,
+    ]);
+    // ...and the routing flag is about MONO, not about "narrower than stereo":
+    // a three-channel source is not routed either.
+    expect(summary.monoRoutedAsDualMono).toBe(false);
+  });
+
+  it('the auto policy keeps both voices once each has MIN_CLUSTER_SIZE fragments', () => {
+    const t = api();
+    // Four windows -> four fragments per voice, exactly MIN_CLUSTER_SIZE: the
+    // boundary value itself, which `foldSmallClusters` keeps.
+    addSpeakerDoc('long.wav', docSamplesForWindows(MIN_CLUSTER_SIZE));
+
+    const summary = t.separateSpeakersLand();
+
+    expect(summary.requestedSpeakerCount).toBeNull();
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.trackNames).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+  });
+
+  it('...and folds them into one below it, which lands as Voice + Backing', () => {
+    const t = api();
+    // One step past the boundary: three windows, three fragments per voice.
+    // Every cluster is then small, so the measured fold (D3, MIN_CLUSTER_SIZE
+    // fixed at 4) collapses them into the largest — the honest auto answer on
+    // this much audio, not a fixture accident.
+    addSpeakerDoc('short.wav', docSamplesForWindows(MIN_CLUSTER_SIZE - 1));
+
+    const summary = t.separateSpeakersLand();
+
+    expect(summary.speakerCount).toBe(1);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+  });
+
+  it('refuses an empty document and a bare app, landing nothing', () => {
+    const t = api();
+    expect(t.separateSpeakersLand(2).ok).toBe(false);
+
+    const empty = createDocument({ name: 'empty.wav', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.ok).toBe(false);
+    expect(summary.documentNames).toEqual([]);
+    expect(summary.trackNames).toEqual([]);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  it('hands back plain JSON (T16)', () => {
+    const t = api();
+    addSpeakerDoc('talk.wav');
+    expectPlainJson(t.separateSpeakersLand(2));
+    expectPlainJson(t.separateSpeakersLand(1));
+  });
+});
+
+/**
+ * D6 — the three fidelity rules `syntheticSpeakerEvidence` builds its host
+ * output from, pinned on the EVIDENCE rather than on the landing.
+ *
+ * They have to be pinned here because none of them is visible downstream: slots
+ * handed out by first appearance, slots fixed per voice, and an emission that
+ * ignores the MIN_EMBED_FRAMES gate all land the same session with the same
+ * documents, so every assertion in `separateSpeakersLand`'s describe above
+ * stays green when one of the three is removed. What they protect is the claim
+ * the hook's docblock makes — that this is the evidence a real host WOULD have
+ * produced (D1/D2) — and a fixture that quietly stopped being that would take
+ * the smoke's speaker coverage with it.
+ */
+describe('syntheticSpeakerEvidence (D6 fixture fidelity)', () => {
+  /** Document samples at 44.1 kHz whose 16 kHz length assembles to exactly
+   *  `frames` frames in ONE zero-padded window: `assembledFrameCount` cuts a
+   *  padded run at `trunc(totalSamples16k / FRAME_SHIFT)`, so the shortest
+   *  16 kHz length reaching `frames` is `frames * FRAME_SHIFT`, and the exact
+   *  rate ratio 44100/16000 = 441/160 turns that into document samples. */
+  const docSamplesForFrames = (frames: number): number =>
+    Math.ceil((frames * FRAME_SHIFT * 441) / 160);
+
+  /** Document samples that resample to exactly `windows` segmentation windows,
+   *  as the two describes around this one compute them. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  /** The GLOBAL voice a fragment carries. `unitVector` puts a whole unit on
+   *  its axis and a ±0.01 wobble everywhere else, so the largest component is
+   *  the voice index the fixture built the vector for — which is what lets a
+   *  slot be read back to the voice that held it. */
+  function voiceOf(vector: Float32Array): number {
+    let best = 0;
+    for (let i = 1; i < vector.length; i++) if (vector[i] > vector[best]) best = i;
+    return best;
+  }
+
+  it('hands local slots out by first appearance, so one voice changes slot between windows', () => {
+    // Window 1 starts at global frame 59 (`windowStartFrame(1)`), which falls
+    // inside the SECOND voice's first turn (frames 48..95 at HOOK_TURN_FRAMES
+    // = 48). That voice therefore appears first in window 1 and takes slot 0 —
+    // the slot the FIRST voice held in window 0. A fixture with slots fixed
+    // per voice is what a real host never produces, and clustering across a
+    // swap is the whole reason the assembly needs vectors at all.
+    const evidence = syntheticSpeakerEvidence(docSamplesForWindows(2), 44100);
+    expect(evidence.windows).toHaveLength(2);
+    expect(HOOK_TURN_FRAMES).toBeLessThan(59);
+
+    const slotZero = (windowIndex: number): Float32Array => {
+      const e = evidence.embeddings.find((x) => x.windowIndex === windowIndex && x.localSpeaker === 0);
+      if (!e) throw new Error(`window ${windowIndex} emitted no slot-0 fragment`);
+      return e.vector;
+    };
+    expect(voiceOf(slotZero(0))).toBe(0);
+    expect(voiceOf(slotZero(1))).toBe(1);
+
+    // The class bytes say it too: frame 0 of BOTH windows is the singleton
+    // class of slot 0 (POWERSET index 1 = [0]), even though the two frames
+    // belong to different voices.
+    expect(evidence.windows[0][0]).toBe(1);
+    expect(evidence.windows[1][0]).toBe(1);
+  });
+
+  it('emits a fragment only once a voice holds MIN_EMBED_FRAMES of the window, and none below it', () => {
+    // D1's emission rule verbatim: at least 10 active frames. One padded
+    // window cut one frame BELOW the gate — the first voice holds a whole turn
+    // and the second holds the MIN_EMBED_FRAMES − 1 frames that are left, so
+    // the host would emit one fragment for that window and so does the fixture.
+    const below = syntheticSpeakerEvidence(
+      docSamplesForFrames(HOOK_TURN_FRAMES + MIN_EMBED_FRAMES - 1),
+      44100
+    );
+    expect(below.windows).toHaveLength(1);
+    expect(below.embeddings).toHaveLength(1);
+    expect(below.embeddings[0].localSpeaker).toBe(0);
+    expect(below.embeddings[0].activeFrames).toBe(HOOK_TURN_FRAMES);
+
+    // One frame of audio more and the second voice sits exactly ON the gate,
+    // which D1 keeps (`activeFrames < MIN_EMBED_FRAMES` is what it drops).
+    const atGate = syntheticSpeakerEvidence(
+      docSamplesForFrames(HOOK_TURN_FRAMES + MIN_EMBED_FRAMES),
+      44100
+    );
+    expect(atGate.embeddings).toHaveLength(2);
+    expect(atGate.embeddings[1].localSpeaker).toBe(1);
+    expect(atGate.embeddings[1].activeFrames).toBe(MIN_EMBED_FRAMES);
+    expect(voiceOf(atGate.embeddings[1].vector)).toBe(1);
+  });
+
+  it('leaves every frame past the assembled cut silent, as a zero-padded tail window would', () => {
+    const frames = HOOK_TURN_FRAMES + MIN_EMBED_FRAMES;
+    const evidence = syntheticSpeakerEvidence(docSamplesForFrames(frames), 44100);
+    const window = evidence.windows[0];
+
+    // The window is a FULL 589-byte one on the wire, whatever the audio ends:
+    // the padding is silence, not a short array.
+    expect(window).toHaveLength(SEG_FRAMES);
+    expect(window[frames - 1]).toBeGreaterThan(0);
+    expect(window.slice(frames)).toEqual(new Uint8Array(SEG_FRAMES - frames));
+  });
+});
+
+/**
+ * D6 — the two hooks that face the REAL diarization host: the model probe the
+ * smoke gates on, and the run itself.
+ *
+ * Driven here through `src/__mocks__/diarizeBackend`, the shared double for the
+ * `diarize:*` preload surface, so what is exercised is the whole renderer path
+ * — `diarizeChannels` resampling the ACTIVE document, accumulating the host's
+ * windows and fragments, and assembling them — with only the utility process
+ * replaced. The hook's own job is the last step of that: flattening a result
+ * carrying `Uint8Array` windows and `Float32Array` vectors into scalars that
+ * survive Playwright's structured-clone boundary (T16).
+ */
+describe('getDiarizeModelState / diarizeActive (D6)', () => {
+  let backend: DiarizeBackend;
+
+  beforeEach(() => {
+    backend = installDiarizeBackend();
+  });
+
+  afterEach(async () => {
+    // Never leave a run reserved for the next test.
+    await cancelDiarization();
+    uninstallDiarizeBackend();
+  });
+
+  /** Spins the microtask queue until `pred` holds (or the budget runs out), so
+   *  a test can wait for the invoke without guessing a tick count. */
+  async function flushUntil(pred: () => boolean, ticks = 200): Promise<void> {
+    for (let i = 0; i < ticks && !pred(); i++) await Promise.resolve();
+  }
+
+  /** Document samples at 44.1 kHz that resample to exactly `windows`
+   *  segmentation windows — the rate pair divides exactly (44100 / 16000 =
+   *  2.75625), so the fixture needs no rounding argument. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  function addStemDoc(name: string, samples: number): AudioDocument {
+    const channels = [0, 1].map((c) => {
+      const ch = new Float32Array(samples);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = 0.4 * Math.sin((2 * Math.PI * (140 + 60 * c) * i) / 44100) + (c === 0 ? 0.04 : -0.02);
+      }
+      return ch;
+    });
+    const doc = createDocument({ name, sampleRate: 44100, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  /** One window with the three local slots on three frame ranges — the
+   *  overlap-free shape `diarizeService.test.ts` derives its segments from. */
+  function fixtureWindow(): Uint8Array {
+    return classWindow([
+      { from: 0, to: 200, class: 1 },
+      { from: 200, to: 400, class: 2 },
+      { from: 400, to: WIRE_WINDOW_FRAMES, class: 3 },
+    ]);
+  }
+
+  /** One window with slots 0 and 1 active over EVERY frame: powerset class 4
+   *  is `[0, 1]` (D3's POWERSET), the two-slot class the host sends when two
+   *  voices talk at once — so `speakerCountPerFrame` reads 2 and the assembly
+   *  keeps both clusters active on the same frames. */
+  function crosstalkWindow(): Uint8Array {
+    return classWindow([{ from: 0, to: WIRE_WINDOW_FRAMES, class: 4 }]);
+  }
+
+  /** Voice A holds slot 0 in every window plus slot 2 of window 0 (four
+   *  fragments); voice B holds slot 1 everywhere plus slot 2 of windows 1 and 2
+   *  (five). Both at or above MIN_CLUSTER_SIZE, which is what stops the auto
+   *  fold collapsing them into one. */
+  const AXES: { windowIndex: number; localSpeaker: number; axis: number }[] = [
+    { windowIndex: 0, localSpeaker: 0, axis: 0 },
+    { windowIndex: 0, localSpeaker: 1, axis: 1 },
+    { windowIndex: 0, localSpeaker: 2, axis: 0 },
+    { windowIndex: 1, localSpeaker: 0, axis: 0 },
+    { windowIndex: 1, localSpeaker: 1, axis: 1 },
+    { windowIndex: 1, localSpeaker: 2, axis: 1 },
+    { windowIndex: 2, localSpeaker: 0, axis: 0 },
+    { windowIndex: 2, localSpeaker: 1, axis: 1 },
+    { windowIndex: 2, localSpeaker: 2, axis: 1 },
+  ];
+  const ACTIVE_FRAMES = [200, 200, WIRE_WINDOW_FRAMES - 400];
+
+  /** Streams `windowCount` windows and the fragments belonging to them, with
+   *  the host's own progress for both stages, then settles the invoke. */
+  function streamFixture(windowCount: number): void {
+    for (let i = 0; i < windowCount; i++) {
+      backend.emit.progress({ stage: 'segment', done: i + 1, total: windowCount });
+      backend.emit.window({ index: i, labels: fixtureWindow() });
+    }
+    const fragments = AXES.filter((f) => f.windowIndex < windowCount);
+    fragments.forEach((f, k) => {
+      backend.emit.progress({ stage: 'embed', done: k + 1, total: fragments.length });
+      backend.emit.embedding({
+        windowIndex: f.windowIndex,
+        localSpeaker: f.localSpeaker,
+        activeFrames: ACTIVE_FRAMES[f.localSpeaker],
+        vector: speakerVector(f.axis, 4000 + k * 37),
+      });
+    });
+    backend.settle({ ok: true, windowCount });
+  }
+
+  it('reports the two-file model set the diarizer needs', async () => {
+    const t = api();
+    backend.modelState = { downloaded: false, bytes: 1024, expectedBytes: WIRE_MODEL_BYTES };
+
+    const state = await t.getDiarizeModelState();
+
+    expect(state).toEqual({ downloaded: false, bytes: 1024, expectedBytes: WIRE_MODEL_BYTES });
+    expect(backend.modelStateCalls).toBe(1);
+    expectPlainJson(state);
+  });
+
+  it('runs the real host on the active document and flattens the evidence to scalars', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(3));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    streamFixture(3);
+    const summary = await promise;
+
+    expect(summary.ok).toBe(true);
+    expect(summary.status).toBe('ok');
+    expect(summary.message).toBeNull();
+    // The document the hook handed over: its own rate and length, resampled
+    // once to the model's 16 kHz.
+    expect(backend.lastRequest?.sampleRate).toBe(16000);
+    expect(backend.lastRequest?.samples.byteLength).toBe((SEG_WINDOW + 2 * SEG_SHIFT) * 4);
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(docSamplesForWindows(3));
+    expect(summary.totalSamples16k).toBe(SEG_WINDOW + 2 * SEG_SHIFT);
+    expect(summary.windowCount).toBe(3);
+    expect(summary.embeddingCount).toBe(AXES.length);
+    // Two voices, neither folded and neither under the share floor.
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.preFoldClusterCount).toBe(2);
+    expect(summary.rawClusterCount).toBe(2);
+    expect(summary.segmentCount).toBe(2);
+    expect(summary.overlapCount).toBe(0);
+    expect(summary.speechSeconds).toHaveLength(2);
+    for (const s of summary.speechSeconds) expect(s).toBeGreaterThan(0);
+    // The host really streamed, and the service really walked its phases.
+    expect(summary.progressEvents).toBeGreaterThan(0);
+    expect(summary.phasesSeen).toEqual(['resampling', 'segmenting', 'embedding', 'clustering']);
+    expect(summary.maxFraction).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports the fold and the output count as the three DIFFERENT numbers they are', async () => {
+    const t = api();
+    // One window, three one-fragment voices: every cluster is below
+    // MIN_CLUSTER_SIZE, so the measured fold (D3) collapses all three into the
+    // largest and one speaker comes out of three raw clusters.
+    addStemDoc('trio.wav', docSamplesForWindows(1));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    backend.emit.window({ index: 0, labels: fixtureWindow() });
+    [0, 1, 2].forEach((local) => {
+      backend.emit.embedding({
+        windowIndex: 0,
+        localSpeaker: local,
+        activeFrames: ACTIVE_FRAMES[local],
+        vector: speakerVector(local, 7000 + local * 53),
+      });
+    });
+    backend.settle({ ok: true, windowCount: 1 });
+    const summary = await promise;
+
+    expect(summary.preFoldClusterCount).toBe(3);
+    expect(summary.rawClusterCount).toBe(1);
+    expect(summary.speakerCount).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports the assemblys overlap runs, which a two-slot window really produces', async () => {
+    const t = api();
+    // MIN_CLUSTER_SIZE windows -> MIN_CLUSTER_SIZE fragments per voice, the
+    // boundary the auto fold keeps (D3), and every frame of every window
+    // carries BOTH slots. The two voices are then active over the same span,
+    // which is exactly what `finalize`'s sweep line calls overlap.
+    addStemDoc('crosstalk.wav', docSamplesForWindows(MIN_CLUSTER_SIZE));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    for (let i = 0; i < MIN_CLUSTER_SIZE; i++) {
+      backend.emit.window({ index: i, labels: crosstalkWindow() });
+      [0, 1].forEach((local) => {
+        backend.emit.embedding({
+          windowIndex: i,
+          localSpeaker: local,
+          activeFrames: WIRE_WINDOW_FRAMES,
+          vector: speakerVector(local, 9000 + i * 31 + local),
+        });
+      });
+    }
+    backend.settle({ ok: true, windowCount: MIN_CLUSTER_SIZE });
+    const summary = await promise;
+
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.segmentCount).toBe(2);
+    // The field the overlap-free fixture above pins at 0 — measured here
+    // against a timeline that really has an overlap run, so the two together
+    // say the hook reports the assembly rather than a constant.
+    expect(summary.overlapCount).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports the elapsed wall clock of the run, not the seed zero', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+    // `Date.now` is the hook's only clock, and a real run here finishes inside
+    // one millisecond — so the elapsed figure would read 0, which is also the
+    // value the unwired seed carries. The stub advances 250 ms PER READ, which
+    // turns the figure into a count of the clock reads the run takes between
+    // the hook's own two.
+    let clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => (clock += 250));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    streamFixture(1);
+    const summary = await promise;
+
+    expect(summary.ok).toBe(true);
+    // The measured figure, not a floor: ">= 250" is also satisfied by a hook
+    // that reported an absolute clock read (~1,000,750 under this stub) and by
+    // one whose two reads sat back to back around no work at all (250). 3,250
+    // is the span of the whole run: 250 ms times the thirteen reads that
+    // separate the hook's two, twelve of which the run itself takes. A change
+    // in it is a real change in what the reported window covers, to be
+    // re-measured rather than re-tuned.
+    expect(summary.elapsedMs).toBe(3250);
+  });
+
+  it('reports a missing model set without spawning anything', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+    backend.modelState = { downloaded: false, bytes: null, expectedBytes: WIRE_MODEL_BYTES };
+
+    const summary = await t.diarizeActive();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('model-missing');
+    expect(summary.message).toContain('32.5 MB');
+    expect(backend.runCalls).toBe(0);
+    expect(summary.speakerCount).toBe(0);
+    expectPlainJson(summary);
+  });
+
+  it('reports a host failure as a status and a message, never a rejection', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    backend.settle({ ok: false, error: 'the diarization host died' });
+    const summary = await promise;
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('failed');
+    expect(summary.message).toBe('the diarization host died');
+    expectPlainJson(summary);
+  });
+
+  it('answers no-document without calling the host at all', async () => {
+    const t = api();
+
+    const summary = await t.diarizeActive();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.status).toBe('no-document');
+    expect(backend.runCalls).toBe(0);
+    expect(backend.modelStateCalls).toBe(0);
+    expect(summary.windowCount).toBe(0);
+    expectPlainJson(summary);
   });
 });

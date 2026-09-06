@@ -7519,20 +7519,96 @@ async function main() {
     );
     await page.evaluate(() => window.__test.closeActive());
 
-    // L7-13) D4 — Separate Voice: the voice-mode copy, and the two-track landing
+    // L7-13) D4/D5/D6 — Separate Voice: the speaker copy, the two-set model
+    // gate, ONE REAL three-stage run, and the N+1-track landing
     //
-    // The dialog half runs on ANY machine, model or no model: the "what you
-    // get" paragraph is voice-mode copy that must name the two tracks the
-    // landing produces, and it is the sentence a user reads before committing
-    // to a run that takes minutes. The landing half goes through
-    // `separateVoiceLand`, which builds an exact partition of the open document
-    // and hands it to the shipped `landVoice` — so the two documents, the
-    // two-track session and the view switch are the real ones, without 166 MB
-    // of model and minutes of CPU (the model path itself is step 17's).
-    console.log('Separate Voice (D4): the voice-mode dialog, then the two-track landing...');
+    // v1.39 turned this row into a three-stage pipeline (D1): HT-Demucs, then
+    // the speaker host's segmentation + embedding, then the clustering and
+    // assembly in this renderer. Nothing below is a stand-in for that chain —
+    // the ready arm CLICKS Separate and waits for D5's confirmation step, so
+    // the real utilityProcess spawn, the real sliced transport and the real
+    // assembly are all on the wire before anything is asserted about them.
+    //
+    // Three halves, and each answers for something the others structurally
+    // cannot:
+    //   (a) the copy and the model gate, which run on ANY machine: the "what
+    //       you get" paragraph is the sentence a user reads before committing
+    //       to a run that takes minutes, and D5 requires a line per model SET
+    //       so the whole 198 MB bill is visible rather than the unpaid half;
+    //   (b) the REAL run, gated on the 32.5 MB speaker set exactly as step 22
+    //       is gated on the transcription set — provisioned from the
+    //       gitignored test-assets copy when one is there, REPORTED as the
+    //       degraded arm when it is not, never a silent pass;
+    //   (c) the two landings behind the test hooks, which need no model at
+    //       all: `separateVoiceLand` for the N <= 1 door (Voice + Backing,
+    //       still the shipped `landVoice`) and `separateSpeakersLand(2)` for
+    //       the N >= 2 door (two masked speaker documents plus Backing).
+    //
+    // The tone is a 2 s 440 Hz stereo sine, so the speaker step has no speech
+    // to find: the count the review reports is whatever the measured policy
+    // makes of that (0, 1 or 2 fragments' worth), and each of those three
+    // headlines is pinned below. What is NOT allowed is a run that never
+    // reaches the review at all.
+    console.log('Separate Voice (D5/D6): the speaker copy, one real three-stage run, then the landings...');
     const preVoice = await stateOf();
+
+    // Same provisioning stance as step 22's transcription set: when a
+    // repo-local copy exists (test-assets/models/diarization/, gitignored) it
+    // is linked/copied into the app's own model directory first, which is
+    // exactly where the app's downloader would have put it — the two share the
+    // `models/diarization/<pinned filename>` layout (D6). The manager
+    // re-verifies both sha256 pins from disk before every spawn, so a bad copy
+    // fails loudly rather than diarizing with a wrong model.
+    const speakerModel0 = await page.evaluate(() => window.__test.getDiarizeModelState());
+    let speakerModel = speakerModel0;
+    if (!speakerModel.downloaded) {
+      const repoDir = path.join(ROOT, 'test-assets', 'models', 'diarization');
+      if (fs.existsSync(repoDir)) {
+        const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+        const destDir = path.join(userData, 'models', 'diarization');
+        console.log(`  provisioning the diarization models from test-assets into ${destDir}`);
+        fs.mkdirSync(destDir, { recursive: true });
+        for (const name of fs.readdirSync(repoDir)) {
+          const dest = path.join(destDir, name);
+          if (fs.existsSync(dest)) continue;
+          try {
+            fs.linkSync(path.join(repoDir, name), dest);
+          } catch {
+            fs.copyFileSync(path.join(repoDir, name), dest);
+          }
+        }
+        speakerModel = await page.evaluate(() => window.__test.getDiarizeModelState());
+      }
+    }
+
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const voiceBefore = await stateOf();
+    // A per-document IDENTITY for the copy this step just opened, planted
+    // before anything else touches it.
+    //
+    // Every earlier step opens its own `tone.wav`; a full run reaches the
+    // landings below with well over a hundred of them, and they share the
+    // name, the file path, the length, the rate and the channel count — so
+    // none of those can tell THIS step's document apart from a copy some
+    // earlier step edited in place. A marker can: markers are stored per
+    // document id, no other step writes this name, and `getActiveMarkers`
+    // reads the ACTIVE document, which is precisely the thing the by-index
+    // re-activation below is claiming to have chosen. Without an identity
+    // that differs between copies, that claim is unfalsifiable.
+    //
+    // The position is an arbitrary interior sample — not 0, not the length,
+    // not any position an earlier step uses — so a read that returned a
+    // marker but lost its position cannot pass either.
+    const SOURCE_MARK = 'L7-13 source';
+    const SOURCE_MARK_AT = 31777;
+    /** True when the given `getActiveMarkers` list carries this step's mark. */
+    const hasSourceMark = (list) =>
+      Array.isArray(list) &&
+      list.some((m) => m.name === SOURCE_MARK && m.positionSample === SOURCE_MARK_AT);
+    await page.evaluate((m) => window.__test.addMarkerToActive(m.at, m.name), {
+      at: SOURCE_MARK_AT,
+      name: SOURCE_MARK,
+    });
     await openModuleCard(page, 'Pipeline');
     await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 10000 });
     await page.click('[data-testid="pipeline-item"][data-command-id="voice.separate"] button');
@@ -7540,26 +7616,60 @@ async function main() {
     const voiceDialog = await page.evaluate(() => {
       const host = document.querySelector('[data-testid="tool-host"]');
       const panel = host ? host.querySelector('[data-testid="hosted-tool"]') : null;
-      const produces = document.querySelector('[data-testid="separate-produces"]');
-      const guarantees = document.querySelector('[data-testid="separate-guarantees"]');
+      const text = (id) => {
+        const e = document.querySelector(`[data-testid="${id}"]`);
+        // JSX wraps these paragraphs across source lines, which reaches the DOM
+        // as newline + indentation: collapsed here so the pin is the SENTENCE,
+        // not the component's line breaks.
+        return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+      };
       return {
         toolId: host ? host.getAttribute('data-tool-id') : null,
         title: panel ? panel.getAttribute('aria-label') : null,
-        produces: produces ? produces.textContent.trim() : null,
-        guarantees: guarantees ? guarantees.textContent.trim() : null,
+        produces: text('separate-produces'),
+        guarantees: text('separate-guarantees'),
       };
     });
     console.log(`  dialog: ${voiceDialog.title} — ${JSON.stringify(voiceDialog.produces)}`);
-    // D4's DEGRADED arm, which this step used to skip entirely: on a machine
-    // without the model the dialog must show the model block and offer no live
-    // Separate button, and on one with it neither. Which branch runs is read
-    // from the app's own model state rather than assumed from step 17 having
-    // downloaded it — the packaged run has to answer for both machines, and a
-    // regression that ignored `modelMissing` passed on either before this.
-    // The model state is fetched asynchronously by the dialog, so wait until it
-    // has DECIDED — a live Separate or the model block — before reading either.
-    // A dialog still waiting on that fetch shows neither, and reading it there
-    // would fail the ready arm for a reason that has nothing to do with D4.
+    assert(
+      voiceDialog.toolId === 'voice.separate' && voiceDialog.title === 'Separate Voice',
+      `the Pipeline card opened Separate Voice, not Separate into Stems ` +
+        `(${JSON.stringify(voiceDialog)})`
+    );
+    // D5's pre-run copy, pinned VERBATIM in both directions. The old pin here
+    // asked for the words "Two tracks" — the promise this mode no longer keeps,
+    // because what it lands is one track PER SPEAKER plus Backing. An
+    // `includes` pin would have survived the change with the sentence half
+    // rewritten around it, so both paragraphs are compared whole.
+    const VOICE_PRODUCES =
+      'One track per speaker plus Backing. The voice is separated from everything else first, ' +
+      'then each speaker’s turns land on their own track.';
+    const VOICE_GUARANTEES =
+      'Backing adds back to your original as before. Speaker tracks carry that speaker’s turns ' +
+      'with short fades at each edge, so they do not add back sample for sample.';
+    assert(
+      voiceDialog.produces === VOICE_PRODUCES,
+      `it promises one track per speaker plus Backing, and says the voice is lifted out first ` +
+        `(${JSON.stringify(voiceDialog.produces)} vs ${JSON.stringify(VOICE_PRODUCES)})`
+    );
+    // The claim the speaker landing is NOT allowed to make. The five-stem copy
+    // says the stems add up "sample for sample"; a speaker split fades every
+    // edge and carries an overlap twice, so this paragraph has to say the
+    // OPPOSITE of that sentence — not merely avoid the words, which is what the
+    // superseded negative pin checked and what the verbatim pin now settles.
+    assert(
+      voiceDialog.guarantees === VOICE_GUARANTEES,
+      `…and it says outright that the speaker tracks do NOT add back sample for sample ` +
+        `(${JSON.stringify(voiceDialog.guarantees)} vs ${JSON.stringify(VOICE_GUARANTEES)})`
+    );
+
+    // Which arm runs is read from the app's own model state rather than assumed
+    // from step 17 or the provisioning above having succeeded: the packaged run
+    // has to answer for both machines. The dialog probes BOTH sets
+    // asynchronously, so wait until it has DECIDED — a live Separate or the
+    // model block — before reading either. A dialog still waiting on those two
+    // fetches shows neither, and reading it there would fail the ready arm for
+    // a reason that has nothing to do with D5.
     await page.waitForFunction(
       () => {
         const d = document.querySelector('[data-testid="separate-dialog"]');
@@ -7574,55 +7684,318 @@ async function main() {
       { timeout: 15000 }
     );
     const stemModel = await page.evaluate(() => window.__test.getStemModelState());
-    const stemModelUi = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('[data-testid="separate-dialog"] button'));
-      const run = buttons.find((b) => b.textContent.trim() === 'Separate');
+    const gateUi = await page.evaluate(() => {
+      const d = document.querySelector('[data-testid="separate-dialog"]');
+      const run = Array.from(d.querySelectorAll('button')).find(
+        (b) => b.textContent.trim() === 'Separate'
+      );
+      const line = (id) => {
+        const e = d.querySelector(`[data-testid="${id}"]`);
+        return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+      };
       return {
-        missingBlock: document.querySelector('[data-testid="separate-model-missing"]') !== null,
+        missingBlock: d.querySelector('[data-testid="separate-model-missing"]') !== null,
+        stemsLine: line('separate-model-line-stems'),
+        speakersLine: line('separate-model-line-speakers'),
         hasRun: run !== undefined,
         runDisabled: run ? run.disabled : null,
       };
     });
+    const speakersReady = stemModel.downloaded === true && speakerModel.downloaded === true;
     console.log(
-      `  model downloaded=${stemModel.downloaded} -> ${JSON.stringify(stemModelUi)} ` +
-        `(${stemModel.downloaded ? 'ready' : 'DEGRADED'} arm)`
+      `  models: stems downloaded=${stemModel.downloaded}, speakers downloaded=` +
+        `${speakerModel.downloaded} (${(speakerModel.bytes ?? 0) / 1e6} of ` +
+        `${speakerModel.expectedBytes / 1e6} MB on disk) -> ${speakersReady ? 'ready' : 'DEGRADED'} arm`
     );
-    if (stemModel.downloaded) {
+    console.log(`  model gate: ${JSON.stringify(gateUi)}`);
+    if (speakersReady) {
+      // D5's presence rule, ready side: with BOTH sets on disk there is no
+      // model block at all, so neither per-set line is rendered — a gate that
+      // kept naming a download already paid for is the bug this pins.
       assert(
-        !stemModelUi.missingBlock && stemModelUi.hasRun && stemModelUi.runDisabled === false,
-        `with the model downloaded the dialog shows no model block and offers a live Separate ` +
-          `(${JSON.stringify(stemModelUi)})`
+        !gateUi.missingBlock &&
+          gateUi.stemsLine === null &&
+          gateUi.speakersLine === null &&
+          gateUi.hasRun &&
+          gateUi.runDisabled === false,
+        `with both model sets downloaded the dialog shows no model block, neither per-set line, ` +
+          `and offers a live Separate (${JSON.stringify(gateUi)})`
       );
     } else {
+      // D5's presence rule, degraded side: ONE LINE PER SET, both of them,
+      // whichever half is missing — "so the whole bill is visible, not just the
+      // unpaid half" — each naming its own size and its own state.
       assert(
-        stemModelUi.missingBlock && (!stemModelUi.hasRun || stemModelUi.runDisabled === true),
-        `without the model the dialog names the download and refuses to run — the degraded path ` +
-          `D4 asks for (${JSON.stringify(stemModelUi)})`
+        gateUi.missingBlock && (!gateUi.hasRun || gateUi.runDisabled === true),
+        `without both sets the dialog names the download and refuses to run — the degraded path ` +
+          `D5 asks for (${JSON.stringify(gateUi)})`
+      );
+      assert(
+        gateUi.stemsLine !== null && gateUi.speakersLine !== null,
+        `…with a line for EACH model set, not only the missing one (${JSON.stringify(gateUi)})`
+      );
+      assert(
+        gateUi.stemsLine.includes('166 MB') &&
+          gateUi.stemsLine.includes(stemModel.downloaded ? 'already here' : 'needed') &&
+          gateUi.speakersLine.includes('32.5 MB') &&
+          gateUi.speakersLine.includes(speakerModel.downloaded ? 'already here' : 'needed'),
+        `…each carrying its own size and its own state (${JSON.stringify(gateUi)})`
+      );
+      console.log(
+        `Separate Voice: the REAL three-stage run is SKIPPED (REPORTED) — one of the two model ` +
+          `sets is not on this machine and no valid repo-local copy exists at ` +
+          `test-assets/models/ (htdemucs_fp16weights.onnx / diarization/). Download them in-app ` +
+          `(Pipeline → Separate Voice → Download Models) to make this half run.`
       );
     }
-    assert(
-      voiceDialog.toolId === 'voice.separate' && voiceDialog.title === 'Separate Voice',
-      `the Pipeline card opened Separate Voice, not Separate into Stems ` +
-        `(${JSON.stringify(voiceDialog)})`
-    );
-    assert(
-      voiceDialog.produces !== null &&
-        voiceDialog.produces.includes('Voice') &&
-        voiceDialog.produces.includes('Backing') &&
-        voiceDialog.produces.includes('Two tracks'),
-      `and it promises the TWO tracks this mode lands (${JSON.stringify(voiceDialog.produces)})`
-    );
-    // The claim the two-track landing is NOT allowed to make. The five-stem
-    // copy says the stems add up “sample for sample”; summing two of them
-    // rounds, so the voice-mode paragraph must not repeat it.
-    assert(
-      voiceDialog.guarantees !== null && !voiceDialog.guarantees.includes('sample for sample'),
-      `…without repeating the five-stem sample-for-sample guarantee, which two tracks cannot keep ` +
-        `(${JSON.stringify(voiceDialog.guarantees)})`
-    );
-    await closeHostedTool();
+
+    if (speakersReady) {
+      // --- the REAL three-stage pass (D1) --------------------------------
+      //
+      // 2 s of audio, but the run still pays both model loads (166 MB of
+      // HT-Demucs, then the two ONNX sessions the speaker host spawns), which
+      // is why the deadline below is minutes rather than seconds. The stage
+      // labels are collected while waiting instead of sampled once: they are
+      // the only visible evidence that the weighted bar walked D5's three
+      // stages rather than jumping from 0 to the review.
+      const runDeadline = Date.now() + 900000;
+      const stageLabels = [];
+      let outcome = 'TIMED OUT';
+      const startedRun = Date.now();
+      await page.evaluate(() => {
+        const d = document.querySelector('[data-testid="separate-dialog"]');
+        const b = Array.from(d.querySelectorAll('button')).find(
+          (x) => x.textContent.trim() === 'Separate'
+        );
+        if (!b || b.disabled) throw new Error('the dialog offered no live Separate to click');
+        b.click();
+      });
+      while (Date.now() < runDeadline) {
+        const snap = await page.evaluate(() => {
+          const d = document.querySelector('[data-testid="separate-dialog"]');
+          if (!d) return { gone: true };
+          const label = d.querySelector('[data-testid="separate-progress-label"]');
+          const err = d.querySelector('[data-testid="separate-error"]');
+          return {
+            gone: false,
+            label: label ? label.textContent.trim() : null,
+            review: d.querySelector('[data-testid="speaker-review"]') !== null,
+            error: err ? err.textContent.trim() : null,
+          };
+        });
+        if (snap.gone) {
+          outcome = 'the dialog closed itself';
+          break;
+        }
+        if (snap.label !== null && !stageLabels.includes(snap.label)) stageLabels.push(snap.label);
+        if (snap.review) {
+          outcome = 'review';
+          break;
+        }
+        if (snap.error !== null) {
+          outcome = `error: ${snap.error}`;
+          break;
+        }
+        await page.waitForTimeout(250);
+      }
+      const runSeconds = (Date.now() - startedRun) / 1000;
+      const audioSeconds = voiceBefore.length / voiceBefore.sampleRate;
+      console.log(
+        `  three-stage run: ${outcome} in ${runSeconds.toFixed(1)}s for ${audioSeconds.toFixed(1)}s ` +
+          `of audio (both model loads included); stage labels seen ${JSON.stringify(stageLabels)}`
+      );
+      assert(
+        outcome === 'review',
+        `the real three-stage pass — Demucs, the speaker host, the assembly — reached D5's ` +
+          `confirmation step (${outcome})`
+      );
+
+      const review = await page.evaluate(() => {
+        const d = document.querySelector('[data-testid="speaker-review"]');
+        const text = (id) => {
+          const e = d.querySelector(`[data-testid="${id}"]`);
+          return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+        };
+        const select = d.querySelector('[data-testid="speaker-count"]');
+        const land = Array.from(
+          document.querySelectorAll('[data-testid="separate-dialog"] button')
+        ).find((b) => b.textContent.trim().startsWith('Land '));
+        return {
+          headline: text('speaker-review-headline'),
+          rows: Array.from(d.querySelectorAll('[data-testid^="speaker-review-row-"]')).map((e) =>
+            e.textContent.replace(/\s+/g, ' ').trim()
+          ),
+          size: text('speaker-review-size'),
+          limits: text('speaker-review-limits'),
+          selectDisabled: select ? select.disabled : null,
+          selectValue: select ? select.value : null,
+          selectOptions: select ? select.options.length : 0,
+          landLabel: land ? land.textContent.trim() : null,
+        };
+      });
+      console.log(`  review: ${JSON.stringify(review)}`);
+      // How many speakers the review is showing, read from the ROWS rather
+      // than from the headline it is being checked against: one row per entry
+      // in the assembly's `speechSeconds`, which is its speaker count.
+      const found = review.rows.length;
+      assert(
+        found === 0 || found === 1 || found === 2,
+        `a 2 s 440 Hz sine yields none, one or two speakers — never more, which would mean the ` +
+          `policy split a pure tone (${found} rows: ${JSON.stringify(review.rows)})`
+      );
+      // Each of the three headlines D5 pins, matched to the count the rows
+      // actually show. The zero case is the one this fixture is most likely to
+      // take, and it is also the only one whose sentence has to promise a
+      // fallback rather than report a finding.
+      if (found === 0) {
+        assert(
+          review.headline === 'No distinct speakers were found — the voice will land as one track.',
+          `with no evidence the review says so and names what will land instead ` +
+            `(${JSON.stringify(review.headline)})`
+        );
+        assert(
+          review.selectDisabled === true,
+          `…and the count select is dead, because there is no evidence to re-cluster ` +
+            `(disabled=${review.selectDisabled})`
+        );
+        assert(
+          review.size === null,
+          `…and no per-document memory line, because no speaker document will be built ` +
+            `(${JSON.stringify(review.size)})`
+        );
+      } else if (found === 1) {
+        assert(
+          review.headline === 'Found one voice.',
+          `one speaker reads as one VOICE, not "1 speakers" (${JSON.stringify(review.headline)})`
+        );
+      } else {
+        assert(
+          review.headline === 'Found 2 speakers.',
+          `two speakers are reported as two (${JSON.stringify(review.headline)})`
+        );
+        assert(
+          review.size !== null && review.size.includes('2 of them need'),
+          `…with D4's memory bill for the pair before the user commits to it ` +
+            `(${JSON.stringify(review.size)})`
+        );
+      }
+      assert(
+        review.landLabel === (found >= 2 ? `Land ${found} speakers + Backing` : 'Land Voice + Backing'),
+        `the Land button names exactly what it is about to land (${JSON.stringify(review.landLabel)} ` +
+          `at ${found} speaker(s))`
+      );
+      assert(
+        review.selectOptions >= 6,
+        `the count select offers at least the six D3 caps the auto policy can produce ` +
+          `(${review.selectOptions} options)`
+      );
+      assert(
+        review.limits !== null &&
+          review.limits.startsWith(
+            'On the four test recordings (three with two speakers, one with four) the count was ' +
+              'right every time'
+          ),
+        `and the review states the measured limits of that count rather than implying none ` +
+          `(${JSON.stringify(review.limits)})`
+      );
+
+      // Close from the review: D5 says nothing lands and the user's session is
+      // untouched. Asserted against the document count TAKEN BEFORE THE RUN, so
+      // a Land that fired on the way out would be caught.
+      await page.evaluate(() => {
+        const b = Array.from(
+          document.querySelectorAll('[data-testid="separate-dialog"] button')
+        ).find((x) => x.textContent.trim() === 'Close');
+        if (!b || b.disabled) throw new Error('the review offered no live Close');
+        b.click();
+      });
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="tool-host"]') === null,
+        null,
+        { timeout: 10000 }
+      );
+      const afterClose = await stateOf();
+      assert(
+        afterClose.docCount === voiceBefore.docCount && afterClose.activeName === voiceBefore.activeName,
+        `Close from the review landed NOTHING and left the source active ` +
+          `(${voiceBefore.docCount} -> ${afterClose.docCount}, active ` +
+          `${JSON.stringify(afterClose.activeName)})`
+      );
+
+      // What the dialog run above CANNOT prove on this fixture, and the reason
+      // this block exists.
+      //
+      // A 2 s sine reaches the ZERO-EVIDENCE review deterministically: no
+      // embeddings, so no rows, no per-document size line, a dead count
+      // select. Every assertion just made is therefore satisfied by a
+      // diarization that returned `{windows: [], embeddings: []}` without ever
+      // spawning the host — the review branch is identical either way. The
+      // stage labels do not close that hole and are deliberately NOT pinned:
+      // "Listening for speakers — window 0 of 0" is the renderer's PRE-SPAWN
+      // placeholder, published immediately before the invoke, and "Comparing
+      // voices" never appears at zero embeddings.
+      //
+      // So the host is asked for its own numbers, through the hook Task 6
+      // built for exactly this. `windowCount` counts the `window` events the
+      // CHILD posted and `totalSamples16k` is the length the child was fed;
+      // both are 0 for a stub, a skip, or a spawn that failed, and neither can
+      // be produced by a renderer that decided there was nothing to do.
+      const diar = await page.evaluate(() => window.__test.diarizeActive());
+      console.log(`  diarizeActive — the speaker host's own numbers: ${JSON.stringify(diar)}`);
+      assert(
+        diar.ok === true && diar.status === 'ok',
+        `a direct pass through the REAL speaker host succeeds: the utilityProcess spawned, both ` +
+          `ONNX sessions loaded and the job ran to 'done' ` +
+          `(${diar.status}${diar.message === null ? '' : `: ${JSON.stringify(diar.message)}`})`
+      );
+      // D1's resample, re-derived from the document the app actually holds
+      // rather than written down: `modelLength16k` is
+      // round(length · 16000 / rate), so 2 s at 44.1 kHz is 32,000 samples at
+      // 16 kHz. Both sides move together if the fixture ever changes.
+      const expected16k = Math.round(voiceBefore.length * (16000 / voiceBefore.sampleRate));
+      assert(
+        diar.totalSamples16k === expected16k &&
+          diar.lengthSamples === voiceBefore.length &&
+          diar.sampleRate === voiceBefore.sampleRate,
+        `…on THIS document, resampled to the host's 16 kHz: ${expected16k} samples from ` +
+          `${voiceBefore.length}@${voiceBefore.sampleRate} (got ${diar.totalSamples16k} from ` +
+          `${diar.lengthSamples}@${diar.sampleRate})`
+      );
+      // D2's window plan, computed from the two window constants rather than
+      // asserted as a number: windows are 160,000 samples (10 s) shifted by
+      // 16,000 (1 s), and a signal shorter than one window still gets one
+      // zero-padded window — 32,000 samples give exactly 1. A host that never
+      // ran gives 0, which is the whole point of the pin.
+      const SEG_WINDOW_16K = 160000;
+      const SEG_SHIFT_16K = 16000;
+      const expectedWindows =
+        expected16k < SEG_WINDOW_16K
+          ? 1
+          : Math.floor((expected16k - SEG_WINDOW_16K) / SEG_SHIFT_16K) +
+            1 +
+            ((expected16k - SEG_WINDOW_16K) % SEG_SHIFT_16K > 0 ? 1 : 0);
+      assert(
+        diar.windowCount >= 1 && diar.windowCount === expectedWindows,
+        `…and the child delivered D2's own window plan for that length — ${expectedWindows} ` +
+          `window(s) of ${SEG_WINDOW_16K} samples shifted by ${SEG_SHIFT_16K}, not the 0 a ` +
+          `stubbed, skipped or crashed host returns (got ${diar.windowCount})`
+      );
+      // And the stream ran rather than the result arriving in one lump.
+      // `embeddingCount` is NOT pinned: a tone legitimately yields none (no
+      // local speaker clears MIN_EMBED_FRAMES), which is why the window count
+      // above is the artifact this block leans on.
+      assert(
+        diar.progressEvents >= 1 && diar.maxFraction === 1,
+        `…and the run streamed progress and closed its bar at 1 rather than stalling ` +
+          `(${diar.progressEvents} events, max fraction ${diar.maxFraction}, phases ` +
+          `${JSON.stringify(diar.phasesSeen)})`
+      );
+    } else {
+      await closeHostedTool();
+    }
     await openModuleCard(page, 'Files');
 
+    // --- the N <= 1 door: Voice + Backing, still the shipped `landVoice` ---
     const landed = await page.evaluate(() => window.__test.separateVoiceLand());
     console.log(`  separateVoiceLand: ${JSON.stringify(landed)}`);
     assert(landed.ok === true, `the landing ran (${JSON.stringify(landed)})`);
@@ -7667,17 +8040,203 @@ async function main() {
         `(worst |err| ${landed.worstAbsError})`
     );
 
-    // Put the app back. Closed BY NAME rather than by three `closeActive`
-    // calls: closing a document re-activates whichever one the store picks
-    // next, so “close the active one three times” is a guess about that choice
-    // and this is not.
-    for (const name of [
-      `${voiceBefore.activeName} — Voice`,
-      `${voiceBefore.activeName} — Backing`,
-      voiceBefore.activeName,
-    ]) {
-      const matches = await page.evaluate((n) => window.__test.activateDocumentByName(n), name);
-      assert(matches > 0, `the document “${name}” is open to be closed again (${matches})`);
+    // --- the N >= 2 door: two masked speaker documents plus Backing (D4) ---
+    //
+    // Landed from the SOURCE, re-activated by name: `separateVoiceLand` left
+    // one of its own two documents active, and a speaker landing of the Voice
+    // document would name its output after the wrong source and mask a stem
+    // rather than the tone.
+    //
+    // By the LAST match, not the first. A full run reaches here with well over
+    // a hundred documents called `tone.wav` — every earlier step opens its own
+    // copy — and `activateDocumentByName`'s default index 0 would pick the
+    // oldest of them, which is some other step's document and may have been
+    // edited in place. The store keeps documents in insertion order, so the one
+    // THIS step opened is the newest.
+    //
+    // Which is checked by the MARKER planted at the top of the step, not by
+    // name/length/rate: those three are identical across every copy, so an
+    // assertion on them would hold just as well if the `index` argument were
+    // dropped on the floor and the index-0 document stayed active. The
+    // index-0 markers are read FIRST, before the by-index selection, as the
+    // control: on a full run that document is an earlier step's and carries no
+    // such mark, which is what makes the positive assertion below able to
+    // fail.
+    const sourceMatches = await page.evaluate(
+      (n) => window.__test.activateDocumentByName(n),
+      voiceBefore.activeName
+    );
+    const oldestMarks = await page.evaluate(() => window.__test.getActiveMarkers());
+    const backToSource = await page.evaluate(
+      (a) => window.__test.activateDocumentByName(a.name, a.index),
+      { name: voiceBefore.activeName, index: sourceMatches - 1 }
+    );
+    const sourceMarks = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(
+      `  re-activated the source: ${sourceMatches} document(s) named ` +
+        `“${voiceBefore.activeName}”; index 0 carries this step's mark=` +
+        `${hasSourceMark(oldestMarks)}, index ${sourceMatches - 1} carries it=` +
+        `${hasSourceMark(sourceMarks)}`
+    );
+    assert(
+      sourceMatches >= 1 && backToSource === sourceMatches,
+      `the source is still open to land from, and the match count did not move between the two ` +
+        `selections (${sourceMatches} then ${backToSource})`
+    );
+    assert(
+      hasSourceMark(sourceMarks),
+      `…and the document the by-index selection made active is the copy THIS step opened, named ` +
+        `by the marker it planted at sample ${SOURCE_MARK_AT} ` +
+        `(${JSON.stringify(sourceMarks)})`
+    );
+    if (sourceMatches > 1) {
+      assert(
+        !hasSourceMark(oldestMarks),
+        `…and the index genuinely chose it: the FIRST of the ${sourceMatches} matches is an ` +
+          `earlier step's copy and carries no such marker, so an ignored index argument would ` +
+          `have failed the assertion above (${JSON.stringify(oldestMarks)})`
+      );
+    }
+    const sourceAgain = await stateOf();
+    assert(
+      sourceAgain.activeName === voiceBefore.activeName &&
+        sourceAgain.length === voiceBefore.length &&
+        sourceAgain.sampleRate === voiceBefore.sampleRate,
+      `…at the name, length and rate the step opened it with (${JSON.stringify(sourceAgain.activeName)}, ` +
+        `${sourceAgain.length}@${sourceAgain.sampleRate} vs ${voiceBefore.length}@${voiceBefore.sampleRate})`
+    );
+    const speakers = await page.evaluate(() => window.__test.separateSpeakersLand(2));
+    console.log(`  separateSpeakersLand(2): ${JSON.stringify(speakers)}`);
+    assert(speakers.ok === true, `the speaker landing ran (${JSON.stringify(speakers)})`);
+    assert(
+      speakers.requestedSpeakerCount === 2 && speakers.speakerCount === 2,
+      `the forced count is what the assembly produced and what landed ` +
+        `(requested ${speakers.requestedSpeakerCount}, assembled ${speakers.speakerCount})`
+    );
+    assert(
+      JSON.stringify(speakers.trackNames) === JSON.stringify(['Speaker 1', 'Speaker 2', 'Backing']),
+      `three tracks: the speakers in order, Backing LAST (${JSON.stringify(speakers.trackNames)})`
+    );
+    assert(
+      JSON.stringify(speakers.documentNames) ===
+        JSON.stringify([
+          `${voiceBefore.activeName} — Speaker 1`,
+          `${voiceBefore.activeName} — Speaker 2`,
+          `${voiceBefore.activeName} — Backing`,
+        ]),
+      `each document is named after the source and its track (${JSON.stringify(speakers.documentNames)})`
+    );
+    assert(
+      speakers.sessionName === `${voiceBefore.activeName} — Speakers`,
+      `the session is named after the source (${JSON.stringify(speakers.sessionName)})`
+    );
+    assert(
+      speakers.lengthSamples === voiceBefore.length && speakers.sampleRate === voiceBefore.sampleRate,
+      `every speaker document is FULL LENGTH at the source's own rate — D4 masks, it does not trim ` +
+        `(${speakers.lengthSamples}@${speakers.sampleRate} vs ${voiceBefore.length}@${voiceBefore.sampleRate})`
+    );
+    const speakersAfter = await stateOf();
+    assert(
+      speakersAfter.docCount === voiceAfter.docCount + 3,
+      `exactly three documents were added (${voiceAfter.docCount} -> ${speakersAfter.docCount})`
+    );
+    const speakerLanes = await page.evaluate(() => ({
+      views: document.querySelectorAll('[data-testid="multitrack-view"]').length,
+      tracks: document.querySelectorAll('[data-testid="track-header"]').length,
+      clips: document.querySelectorAll('[data-testid="clip"]').length,
+    }));
+    assert(
+      speakerLanes.views === 1 && speakerLanes.tracks === 3 && speakerLanes.clips === 3,
+      `the app switched to a three-track session with one clip each ` +
+        `(${JSON.stringify(speakerLanes)})`
+    );
+    // The mask, from BOTH sides — either alone is vacuous. A document silenced
+    // end to end would satisfy "nothing outside the turns" and a document left
+    // untouched would satisfy "something inside them"; only the pair says the
+    // mask kept this speaker's turns and took everything else to zero.
+    assert(
+      speakers.outsideSpansPeak === 0,
+      `outside its own turns every speaker document is exactly zero ` +
+        `(worst |sample| ${speakers.outsideSpansPeak})`
+    );
+    // The bounds are the fixture's own, not round numbers: the tone is a
+    // 0.5-amplitude sine and `syntheticSeparation` gives its Vocals stem 0.19
+    // of it, so a masked speaker document peaks at about 0.095 — comfortably
+    // inside (0.05, 0.5). The upper bound is the SOURCE's own peak, which no
+    // mask can exceed and a mask that amplified would.
+    assert(
+      speakers.speakerPeaks.length === 2 &&
+        speakers.speakerPeaks.every((p) => p > 0.05 && p < 0.5),
+      `…and inside them each one still carries the tone at the Vocals stem's own level, so the ` +
+        `mask kept audio rather than silencing the lot or amplifying it ` +
+        `(${JSON.stringify(speakers.speakerPeaks)})`
+    );
+    assert(
+      speakers.segmentCounts.length === 2 && speakers.segmentCounts.every((c) => c >= 1),
+      `each speaker got at least one turn (${JSON.stringify(speakers.segmentCounts)})`
+    );
+    // D4 makes NO exact-sum claim for a speaker split, in either direction: the
+    // edge fades remove audio and an overlapping turn is carried twice. `null`
+    // is the landing's own verdict, echoed rather than re-derived here.
+    assert(
+      speakers.exactSumHolds === null,
+      `and the landing claims nothing about the sum, which a faded, overlapping split cannot ` +
+        `keep (${JSON.stringify(speakers.exactSumHolds)})`
+    );
+
+    // Put the app back. Closed BY NAME rather than by six `closeActive` calls:
+    // closing a document re-activates whichever one the store picks next, so
+    // “close the active one six times” is a guess about that choice and this is
+    // not. `— Backing` appears TWICE — one from each landing — and the first
+    // pass over it is asserted to see both, which is itself the proof the two
+    // landings each built their own rather than sharing one.
+    //
+    // The five landed names are this step's alone, so index 0 is the only
+    // match and picks itself. The SOURCE is not: `last: true` closes the newest
+    // `tone.wav`, which is the one this step opened and landed from, and leaves
+    // the hundred-odd copies the earlier steps opened exactly where they were —
+    // and that one close is checked against the planted marker before it fires,
+    // for the reason the landing above gives: nothing else distinguishes the
+    // copies, so “it closed the right one” is otherwise unfalsifiable.
+    const restoreOrder = [
+      { name: `${voiceBefore.activeName} — Voice`, expect: 1 },
+      { name: `${voiceBefore.activeName} — Backing`, expect: 2 },
+      { name: `${voiceBefore.activeName} — Speaker 1`, expect: 1 },
+      { name: `${voiceBefore.activeName} — Speaker 2`, expect: 1 },
+      { name: `${voiceBefore.activeName} — Backing`, expect: 1 },
+      { name: voiceBefore.activeName, expect: null, last: true },
+    ];
+    for (const entry of restoreOrder) {
+      const matches = await page.evaluate(
+        (a) => window.__test.activateDocumentByName(a.name),
+        entry
+      );
+      assert(
+        matches > 0,
+        `the document “${entry.name}” is open to be closed again (${matches})`
+      );
+      // `— Backing` is expected TWICE on its first pass — one per landing —
+      // which is the proof the two landings each built their own rather than
+      // one being the other's. The derived names are counted exactly; the
+      // source's own count is whatever the run accumulated and says nothing.
+      if (entry.expect !== null) {
+        assert(
+          matches === entry.expect,
+          `…and there are exactly ${entry.expect} of it at this point (${matches})`
+        );
+      }
+      if (entry.last) {
+        await page.evaluate(
+          (a) => window.__test.activateDocumentByName(a.name, a.index),
+          { name: entry.name, index: matches - 1 }
+        );
+        const closing = await page.evaluate(() => window.__test.getActiveMarkers());
+        assert(
+          hasSourceMark(closing),
+          `…and the copy about to be closed is the one THIS step opened and marked, not one of ` +
+            `the ${matches - 1} the earlier steps left open (${JSON.stringify(closing)})`
+        );
+      }
       await page.evaluate(() => window.__test.closeActive());
     }
     await page.evaluate((rate) => window.__test.newSession(rate), 44100);

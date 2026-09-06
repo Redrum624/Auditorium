@@ -74,8 +74,8 @@ CertUtil -hashfile "Auditorium Setup X.Y.Z.exe" SHA256   # compare with SHA256SU
 
 - **Windows 10 or 11** (64-bit)
 - AI features download their models on first use (166 MB stems · ~323 MB
-  transcription · 161 MB voice · 378 MB lyric alignment), verified by pinned
-  sha256 before every load.
+  transcription · 32.5 MB speaker separation · 161 MB voice · 378 MB lyric
+  alignment), verified by pinned sha256 before every load.
 
 ### Build from source
 
@@ -158,7 +158,7 @@ over the audio.
 - **Cover Chain Tool** — the six-stage journey from original song + your take to a finished two-track session, with the caveats stated above the Run button.
 - **Podcast Chain Tool** — ten speech-tuned stages ending in a delivery target: DC removal, noise reduction, de-hum, shortened pauses, gate, compression, de-essing, EQ, **loudness to −16 LUFS (stereo) or −19 LUFS (mono)** by ITU-R BS.1770-4, and a limiter at −1.0 dBFS **sample peak**. One undo entry; documents with more than two channels are refused rather than mis-measured.
 - **Auto-Remix Tool & Remix Panel** — re-arranges a track's own bars to a target length; every splice inspectable, rejectable, pinnable (up to four pins guaranteed to survive every re-plan) and undoable.
-- **Separate Voice Tool** — the same separation landed as two tracks instead of five: `— Voice` and `— Backing` (drums + bass + everything else + residual). The two add back up to the source **within float32 rounding** (measured worst error 4.32e-7) — the five-stem landing is the bit-exact one.
+- **Separate Voice Tool** — the same separation landed as two tracks instead of five: `— Voice` and `— Backing` (drums + bass + everything else + residual). The two add back up to the source **within float32 rounding** (measured worst error 4.32e-7) — the five-stem landing is the bit-exact one. When more than one person is talking it goes one step further and lands **one track per speaker** plus Backing: it counts the voices, shows you the count with each speaker's speech time before anything lands, and lets you overrule it. On the four test recordings (three with two speakers, one with four) the count was right every time, both from clean speech and through the separation the tool runs first — measured in [`docs/bench/diarize-bench-baseline.json`](docs/bench/diarize-bench-baseline.json). Speaker tracks carry short fades at each turn and share any overlap, so they do **not** add back sample for sample; Backing still does.
 - **Separate into Stems Tool** — Drums/Bass/Vocals/Other + Residual as five documents and a session that sums back to the source **bit-exactly** (measured: worst error 0).
 - **Transcribe Tool & Transcript Panel** — timestamped speech-to-text with speaker labels, coloured timeline regions, instant speaker-count regrouping, SRT/WebVTT export.
 - **Voice Changer Tool** — re-timbres a recording toward a saved voice profile; requires an explicit rights affirmation before any reference clip is used.
@@ -212,6 +212,7 @@ overshoot on both faders equally — one undo entry.
 
 - **Tempo detection** — tracked beats (not extrapolated), confidence reported, ×2/÷2 octave re-track.
 - **Stem separation** — bit-exact recombination guaranteed; separation quality bounded by the model, and the UI says so. CPU at ~1.5× realtime.
+- **Speaker separation** (Separate Voice) — the right count on 4 of 4 test recordings, in both conditions measured (clean speech and through the stem separation the tool runs first); ~162 s of material, count-only truth, no diarization error rate, near-zero overlap in it — the tool prints that limit beside the count and hands you the control.
 - **Transcription** — 100 % speaker accuracy on clean two-voice material, 45–73 % at three voices, overlap not detected: printed in the tool, and the speaker count is a control you can change instantly.
 - **Voice changer** — measured mean cosine 0.795 toward the target (vs 0.615 source) across five real voices; a change, not a forensic clone, and the tool says which.
 - **Lyric alignment** — median 20 ms word starts, 88 % within 100 ms on sung material; a mismatch between lyrics and audio raises a warning, never a refusal.
@@ -272,6 +273,13 @@ the change.
 - **Speech recognition** — **Whisper base** by **OpenAI** (Apache-2.0), via
   [`onnx-community/whisper-base`](https://huggingface.co/onnx-community/whisper-base).
 - **Speaker embeddings** — **CAM++** by the **WeSpeaker** project (Apache-2.0), from the
+  [sherpa-onnx model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models).
+- **Speaker segmentation** (Separate Voice) — **pyannote-segmentation-3.0** by **Hervé
+  Bredin / CNRS** (MIT), via the ONNX conversion in
+  [`csukuangfj/sherpa-onnx-pyannote-segmentation-3-0`](https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0)
+  — the upstream HuggingFace repository is gated; this mirror is not.
+- **Speaker embeddings for Separate Voice** — **WeSpeaker ResNet34-LM** (VoxCeleb,
+  Apache-2.0), from the same
   [sherpa-onnx model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models).
 - **Voice conversion** — **OpenVoice V2** by **MyShell.ai** (MIT), via
   [`Hinotsuba/OpenVoice-ONNX-v2`](https://huggingface.co/Hinotsuba/OpenVoice-ONNX-v2) (MIT).

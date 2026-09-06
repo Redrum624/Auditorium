@@ -148,6 +148,35 @@ const electronAPI = {
   voiceProfilesLoad: () => ipcRenderer.invoke('voice:profiles-load'),
   voiceProfilesSave: (req) => ipcRenderer.invoke('voice:profiles-save', req),
 
+  // Speaker diarization (Separate Speakers, D2). Channels, payload shapes and
+  // event layouts are documented in electron/diarizeManager.cjs's module
+  // header; this bridge adds no logic of its own beyond the on*/unsubscribe
+  // pattern used above.
+  diarizeModelState: () => ipcRenderer.invoke('diarize:model-state'),
+  diarizeEnsureModels: () => ipcRenderer.invoke('diarize:ensure-models'),
+  onDiarizeModelProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('diarize:model-progress', listener);
+    return () => ipcRenderer.removeListener('diarize:model-progress', listener);
+  },
+  diarizeRun: (req) => ipcRenderer.invoke('diarize:run', req),
+  diarizeCancel: () => ipcRenderer.invoke('diarize:cancel'),
+  onDiarizeProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('diarize:progress', listener);
+    return () => ipcRenderer.removeListener('diarize:progress', listener);
+  },
+  onDiarizeWindow: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('diarize:window', listener);
+    return () => ipcRenderer.removeListener('diarize:window', listener);
+  },
+  onDiarizeEmbedding: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('diarize:embedding', listener);
+    return () => ipcRenderer.removeListener('diarize:embedding', listener);
+  },
+
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
   // Launch splash (S1): the EDITOR's end of the handoff. `splashRendererReady`
