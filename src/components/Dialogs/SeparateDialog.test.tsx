@@ -446,6 +446,29 @@ describe('SeparateDialog', () => {
     expect(mockLandStems).not.toHaveBeenCalled();
   });
 
+  it('11b. stems that arrive AFTER the unmount are discarded, not landed', async () => {
+    seedDoc();
+    const output = makeOutput();
+    const { unmount, pending, onClose } = await startRun();
+
+    unmount();
+    expect(mockCancel).toHaveBeenCalledTimes(1);
+
+    // Test 11 resolves CANCELLED, and `!result.ok` returns before the landing
+    // on its own — so the unmount guard it looks like it is testing can be
+    // deleted with test 11 still green. This is the resolve that reaches it:
+    // the host was already partitioning when the dialog went away and hands
+    // back a finished output. It must be dropped. Landing it builds five
+    // documents and a multitrack session into a session the user has closed
+    // the dialog on, and calls `onClose` on a component that is gone.
+    await act(async () => {
+      pending.resolve({ ok: true, output });
+    });
+
+    expect(mockLandStems).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('12. success lands the five documents and closes', async () => {
     seedDoc();
     const output = makeOutput();
@@ -603,8 +626,11 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     };
   }
 
-  /** Two speakers, three turns, 9 s against 3 s — deliberately unequal, so a
-   *  share line that printed 50/50 (or the seconds twice) would fail. */
+  /** Two speakers, three turns, 10 s against 3 s — deliberately unequal, and
+   *  deliberately NOT dividing into whole percents. 10 of 13 is 76.92 % and 3
+   *  of 13 is 23.08 %, so `Math.round` (77/23), `Math.floor` (76/23) and
+   *  `Math.ceil` (77/24) all disagree and the share line's rounding is
+   *  measured. A 9/3 split reads 75/25 under all three — the identity. */
   function makeDiarization(overrides: Partial<Diarization> = {}): Diarization {
     return {
       speakerCount: 2,
@@ -616,7 +642,7 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
         { startSample16k: 136_000, endSample16k: 232_000, speaker: 0 },
       ],
       overlapSegments: [],
-      speechSeconds: [9, 3],
+      speechSeconds: [10, 3],
       ...overrides,
     };
   }
@@ -723,7 +749,17 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // The Demucs model is present, so its ensure is never called.
     expect(mockEnsureModel).not.toHaveBeenCalled();
     expect(mockEnsureDiarize).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId('separate-download-status')).toHaveTextContent('speaker models');
+    const status = screen.getByTestId('separate-download-status');
+    expect(status).toHaveTextContent('speaker models');
+    // ONE download, ONE size. VG1 pins the per-set line at 32.5 MB and the
+    // progress line four lines under it has to agree: whole megabytes round
+    // 32,523,463 B up to "33 MB" and put two different figures for the same
+    // file on one panel. The RECEIVED half stays whole-megabyte — a decimal
+    // that changes ten times a second is noise — so only the total is quoted
+    // the way the set itself is.
+    expect(status).toHaveTextContent('of 32.5 MB');
+    expect(status).not.toHaveTextContent('of 33 MB');
+    expect(screen.getByTestId('separate-model-line-speakers')).toHaveTextContent('32.5 MB');
 
     act(() => {
       mockEnsureDiarize.mock.calls[0][0]!({ received: DIARIZE_BYTES / 2, total: DIARIZE_BYTES });
@@ -820,7 +856,7 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockEnsureModel).toHaveBeenCalledTimes(1);
     expect(mockEnsureDiarize).toHaveBeenCalledTimes(2);
     const status = screen.getByTestId('separate-download-status');
-    expect(status).toHaveTextContent('of 33 MB');
+    expect(status).toHaveTextContent('of 32.5 MB');
     expect(status).not.toHaveTextContent('of 198 MB');
   });
 
@@ -1071,10 +1107,21 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
 
     expect(screen.getByTestId('speaker-review')).toBeInTheDocument();
     expect(screen.getByTestId('speaker-review-headline')).toHaveTextContent('Found 2 speakers');
-    expect(screen.getByTestId('speaker-review-row-1')).toHaveTextContent('0:09');
-    expect(screen.getByTestId('speaker-review-row-1')).toHaveTextContent('75%');
+    expect(screen.getByTestId('speaker-review-row-1')).toHaveTextContent('0:10');
     expect(screen.getByTestId('speaker-review-row-2')).toHaveTextContent('0:03');
-    expect(screen.getByTestId('speaker-review-row-2')).toHaveTextContent('25%');
+    // 10 s and 3 s of 13 s placed: 76.92 % and 23.08 %. Pinned as the ROUNDED
+    // pair AND as a pair that still sums to 100 — `Math.floor` prints 76/23
+    // (99 in total) and `Math.ceil` prints 77/24 (101). Whole-percent fixtures
+    // agree under all three, so they pin the seconds, not the rounding.
+    const shares = [1, 2].map((row) =>
+      Number(
+        /(\d+)% of what was placed/.exec(
+          screen.getByTestId(`speaker-review-row-${row}`).textContent ?? ''
+        )![1]
+      )
+    );
+    expect(shares).toEqual([77, 23]);
+    expect(shares[0] + shares[1]).toBe(100);
     // D4's worked example: 15 min of 44.1 kHz stereo is 317.5 MB per speaker.
     expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('317.5 MB');
     expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('635.0 MB');
@@ -1134,6 +1181,35 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     );
     expect(options).toEqual(['1', '2', '3', '4', '5', '6']);
     expect(MAX_SPEAKERS).toBe(6);
+  });
+
+  const optionValues = (): (string | null)[] =>
+    Array.from(screen.getByTestId('speaker-count').querySelectorAll('option')).map((o) =>
+      o.getAttribute('value')
+    );
+
+  it('VR6b. the offer is pinned AT MAX_SPEAKERS and one step past it', async () => {
+    seedDoc();
+    // VR6 renders two speakers, where `Math.max(MAX_SPEAKERS, speakerCount)`
+    // and the bare constant are the same six options — the identity. These two
+    // counts separate them. Six is the cap D3 puts on the auto policy; SEVEN is
+    // one step past it, and this dialog does not enforce that cap for itself —
+    // it renders the count the service hands back. A select whose value is not
+    // among its options selects NOTHING (measured in this jsdom: value '',
+    // selectedIndex -1), so a bound frozen at six leaves a blank speaker
+    // control on a panel whose headline and Land button both say seven.
+    const six = await runToReview(
+      makeDiarization({ speakerCount: 6, rawClusterCount: 6, speechSeconds: [10, 3, 3, 3, 3, 3] })
+    );
+    expect(optionValues()).toEqual(['1', '2', '3', '4', '5', '6']);
+    expect(screen.getByTestId('speaker-count')).toHaveValue('6');
+    six.unmount();
+
+    await runToReview(
+      makeDiarization({ speakerCount: 7, rawClusterCount: 7, speechSeconds: [10, 3, 3, 3, 3, 3, 3] })
+    );
+    expect(optionValues()).toEqual(['1', '2', '3', '4', '5', '6', '7']);
+    expect(screen.getByTestId('speaker-count')).toHaveValue('7');
   });
 
   const BUTTONS: [number, string][] = [
@@ -1213,6 +1289,30 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockLandVoice).toHaveBeenCalledWith(output);
     expect(mockLandSpeakers).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('VR10b. the count select is gated on the EVIDENCE, not on the count in hand', async () => {
+    seedDoc();
+    // Out of D3's contract on purpose, and that is the point of it: the
+    // assembler never returns zero clusters from a non-empty embedding set, so
+    // on every input the pipeline can produce "no embeddings" and "no
+    // speakers" are the same state and VR10 — which has both at once — cannot
+    // tell the two apart. They differ on exactly one state, and it is the one
+    // where being wrong is unrecoverable: with embeddings in hand a forced
+    // re-cluster is still free, and the select is the only way out of a pass
+    // that placed nobody. Gated on the COUNT instead, an empty result would be
+    // final.
+    const { evidence } = await runToReview(EMPTY_DIARIZATION, makeEvidence(12));
+
+    const select = screen.getByTestId('speaker-count');
+    expect(select).toBeEnabled();
+
+    mockRecluster.mockReturnValue(makeDiarization());
+    await act(async () => {
+      fireEvent.change(select, { target: { value: '2' } });
+    });
+    expect(mockRecluster).toHaveBeenCalledWith(evidence, 2);
+    expect(screen.getByTestId('speaker-review-headline')).toHaveTextContent('Found 2 speakers');
   });
 
   it('VR11. Land hands landSpeakers the per-speaker SPANS, in document samples', async () => {
@@ -1362,6 +1462,25 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(land).toBeDisabled();
     fireEvent.click(land);
     expect(mockLandSpeakers).not.toHaveBeenCalled();
+
+    // ...and picking fewer speakers is the way BACK. The refusal is a live
+    // reading of the count in hand, not a latch the panel keeps once it has
+    // been over the ceiling: exercised only upward, a one-way door would pass
+    // every assertion above and leave the user with a dead Land button and a
+    // budget line about a count they no longer want. The landing here is also
+    // what proves the click above landed nothing because the button was
+    // refused, and not because the mock was never going to be called.
+    mockRecluster.mockReturnValue(makeThreeSpeakers());
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('speaker-count'), { target: { value: '3' } });
+    });
+    expect(screen.queryByTestId('speaker-review-budget')).not.toBeInTheDocument();
+    const backDown = screen.getByRole('button', { name: 'Land 3 speakers + Backing' });
+    expect(backDown).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(backDown);
+    });
+    expect(mockLandSpeakers).toHaveBeenCalledTimes(1);
   });
 
   it('VR15. the budget gate is pinned AT the constant and one step past it', async () => {
@@ -1386,6 +1505,41 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
     });
     expect(screen.getByRole('button', { name: 'Land 2 speakers + Backing' })).toBeDisabled();
+  });
+
+  it('VR15b. the memory refusal is about the SPLIT — one voice lands however big it is', async () => {
+    seedDoc();
+    // One document over the whole ceiling on its own, with a confirmed count of
+    // ONE. D4 prices a split at N x the document and refuses THAT; Voice +
+    // Backing is the landing this dialog has always done and has never been
+    // gated on memory. The `speakerCount >= 2` half of the refusal is what
+    // keeps a long recording landable at all: without it the panel refuses
+    // with "These 1 speaker tracks would need 1.2 GB" — a sentence about
+    // speaker tracks the landing does not contain — and the user has no way
+    // left to get their voice out of the dialog.
+    const lengthSamples = SPEAKER_LANDING_BUDGET_BYTES / (2 * 4) + 1;
+    const output = makeVoiceOutput({ lengthSamples });
+    expect(speakerDocumentBytes(output)).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
+    mockSeparate.mockResolvedValue({ ok: true, output });
+    mockDiarize.mockResolvedValue({
+      ok: true,
+      evidence: makeEvidence(),
+      diarization: makeDiarization({ speakerCount: 1, rawClusterCount: 1, speechSeconds: [10] }),
+    });
+    const { onClose } = await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    expect(screen.queryByTestId('speaker-review-budget')).not.toBeInTheDocument();
+    const land = screen.getByRole('button', { name: 'Land Voice + Backing' });
+    expect(land).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(land);
+    });
+    expect(mockLandVoice).toHaveBeenCalledWith(output);
+    expect(mockLandSpeakers).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('VR16. the sanitised-samples note is shown in the review, before anything lands', async () => {
@@ -1454,6 +1608,56 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockLandSpeakers).not.toHaveBeenCalled();
     expect(mockLandVoice).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('VC1b. a diarize "model-missing" puts the SPEAKER half of the gate back', async () => {
+    seedDoc();
+    mockDiarize.mockResolvedValue({
+      ok: false,
+      status: 'model-missing',
+      message: 'The speaker models have not been downloaded yet (32.5 MB, one time).',
+    });
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    // The message alone (VC1) leaves the user staring at an amber line with no
+    // way to act on it: the state a missing model describes is the DOWNLOAD
+    // state, and stems mode has said so since test 9. Both lines are read,
+    // because the interesting half is the OTHER one — the Demucs set just ran
+    // a whole separation, so it is on disk, and a gate that re-priced its
+    // 166 MB would ask the user to pay a bill they have already paid.
+    expect(screen.getByTestId('separate-model-missing')).toBeInTheDocument();
+    expect(screen.getByTestId('separate-model-line-speakers')).toHaveTextContent('needed');
+    expect(screen.getByTestId('separate-model-line-speakers')).toHaveTextContent('32.5 MB');
+    expect(screen.getByTestId('separate-model-line-stems')).toHaveTextContent('already here');
+    expect(screen.getByRole('button', { name: 'Download Models' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('VC1c. a diarize "failed" leaves the models alone — no gate, no re-download', async () => {
+    seedDoc();
+    mockDiarize.mockResolvedValue({
+      ok: false,
+      status: 'failed',
+      message: 'The speaker separation host failed.',
+    });
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    // The mirror image of VC1b, and the reason the branch is a branch: a host
+    // that crashed says nothing about the files on disk. Flipping the model
+    // state on every refusal would hide the failure behind a 32.5 MB download
+    // that re-verifies two files which are already there and changes nothing.
+    expect(screen.getByTestId('separate-error')).toHaveTextContent('The speaker separation host failed.');
+    expect(screen.queryByTestId('separate-model-missing')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download Models' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Separate' })).toBeEnabled();
   });
 
   it('VS1. a stem-stage refusal in voice mode ends the run instead of hanging it', async () => {
@@ -1613,6 +1817,37 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
       diarPending.resolve({ ok: true, evidence: makeEvidence(), diarization: makeDiarization() });
     });
     expect(mockLandSpeakers).not.toHaveBeenCalled();
+  });
+
+  it('VC4b. a stem result that arrives after the unmount spawns NO diarizer', async () => {
+    seedDoc();
+    const stemPending = deferred<StemSeparationResult>();
+    mockSeparate.mockReturnValue(stemPending.promise);
+    const { unmount } = await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    unmount();
+    expect(mockCancel).toHaveBeenCalledTimes(1);
+    expect(mockCancelDiarize).not.toHaveBeenCalled();
+
+    // VC4 unmounts during stage TWO, which a different guard covers, and every
+    // other unmount test resolves a refusal that returns on `!result.ok`
+    // before the guard is ever consulted. This is the resolve that reaches it:
+    // the stem host was already partitioning when the dialog went away and
+    // hands back four finished stems. Unguarded, the run walks straight on
+    // into stage 2 — a second utility process, gigabytes of it, spawned for a
+    // dialog that no longer exists and whose review nobody can see, with
+    // nothing left to cancel it.
+    await act(async () => {
+      stemPending.resolve({ ok: true, output: makeVoiceOutput() });
+    });
+
+    expect(mockDiarize).not.toHaveBeenCalled();
+    expect(mockCancelDiarize).not.toHaveBeenCalled();
+    expect(mockLandSpeakers).not.toHaveBeenCalled();
+    expect(mockLandVoice).not.toHaveBeenCalled();
   });
 
   it('VC5. unmounting during the REVIEW cancels nothing and lands nothing', async () => {

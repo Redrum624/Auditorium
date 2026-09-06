@@ -78,8 +78,17 @@ function formatSeconds(seconds: number): string {
   return formatMmss(Math.max(0, Math.round(seconds)), 1);
 }
 
-/** Decimal megabytes — the unit the 166 MB figure in the plan and on the
- *  Hugging Face page is quoted in. */
+/**
+ * Decimal megabytes — the unit the 166 MB figure in the plan and on the
+ * Hugging Face page is quoted in — rounded to a whole one.
+ *
+ * The RUNNING download counter, and nothing else. Every figure that names the
+ * SIZE of a download goes through {@link formatModelSize} instead, because
+ * whole megabytes round the speaker set to "33 MB" while the per-set line four
+ * lines above it — and the plan, the README and the docs — all say 32.5: two
+ * numbers on one panel for one file. A moving byte count has no such twin to
+ * disagree with, and a decimal that changes ten times a second is noise.
+ */
 function formatMb(bytes: number): string {
   return `${Math.round(bytes / 1e6)} MB`;
 }
@@ -92,8 +101,12 @@ function formatMb(bytes: number): string {
  * "32.5 MB". {@link formatMb}'s whole megabytes would print the speaker set as
  * "33 MB" while the plan, the README and the docs all say 32.5 — two numbers
  * for one download — and a fixed tenth would print the Demucs set as "165.6 MB"
- * against the 166 quoted everywhere else. The download PROGRESS line keeps
- * whole megabytes: a decimal that changes ten times a second is noise.
+ * against the 166 quoted everywhere else.
+ *
+ * So EVERY size-of-a-download figure is this one: the two per-set gate lines,
+ * the stems-mode sentence, and the total the progress line counts towards.
+ * Only the RECEIVED half of that line is whole megabytes, and it is the half
+ * with nothing to contradict ({@link formatMb}).
  */
 function formatModelSize(bytes: number): string {
   return `${Number((bytes / 1e6).toPrecision(3))} MB`;
@@ -481,6 +494,12 @@ export default function SeparateDialog({
     const { output, diarization } = review;
     const count = diarization.speakerCount;
     if (count >= 2) {
+      // Defence in depth, and deliberately unreachable as the panel stands:
+      // the Land button carries `disabled={overBudget}` with exactly this
+      // predicate, and React delivers no click to a disabled <button>. It is
+      // one line of insurance against the edit that leaves the refusal in the
+      // panel text alone — which would build N full-length documents, 1.3 GB
+      // of them at the smallest count this can refuse, on the first click.
       if (landingBytes > SPEAKER_LANDING_BUDGET_BYTES) return;
       // D4 takes DOCUMENT samples, not the 16 kHz model positions.
       landSpeakers(output, segmentsToDocSamples(diarization, output.sampleRate, output.lengthSamples));
@@ -613,7 +632,7 @@ export default function SeparateDialog({
               </>
             ) : (
               <p className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
-                {`Separation needs the HT-Demucs model — a ${formatMb(
+                {`Separation needs the HT-Demucs model — a ${formatModelSize(
                   stemExpected
                 )} one-time download, kept with the app's settings and reused for every later separation.`}
               </p>
@@ -628,8 +647,12 @@ export default function SeparateDialog({
                   {voice
                     ? `Downloading the ${
                         downloadingSet === 'speakers' ? 'speaker models' : 'voice separation model'
-                      }… ${formatMb(downloadedBase + received)} of ${formatMb(downloadTotal)}`
-                    : `Downloading… ${formatMb(downloadedBase + received)} of ${formatMb(downloadTotal)}`}
+                      }… ${formatMb(downloadedBase + received)} of ${formatModelSize(
+                        downloadTotal
+                      )}`
+                    : `Downloading… ${formatMb(downloadedBase + received)} of ${formatModelSize(
+                        downloadTotal
+                      )}`}
                 </p>
                 <ProgressTrack
                   testId="separate-download-progress"
