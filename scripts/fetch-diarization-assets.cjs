@@ -20,7 +20,17 @@
  *         corrupt file is deleted and re-fetched.
  *
  *   test-assets/diarization/{0-four,1-two,2-two,3-two}-speakers-*.wav
- *       — 16 kHz mono PCM, 16.0 / 34.0 / 54.8 / 56.9 s. Test material from
+ *       — 16 kHz mono PCM. Each name carries its own duration, because a
+ *         list of four names beside a list of four numbers reads
+ *         positionally and design-notes.md's order is not this one:
+ *
+ *         0-four-speakers-zh.wav — 56.9 s
+ *         1-two-speakers-en.wav — 16.0 s
+ *         2-two-speakers-en.wav — 34.0 s
+ *         3-two-speakers-en.wav — 54.8 s
+ *
+ *         (design-notes.md, and the `audioSeconds` the bench measures in
+ *         docs/bench/diarize-bench-baseline.json.) Test material from
  *         the sherpa-onnx GitHub release `speaker-segmentation-models`
  *         (github.com/k2-fsa/sherpa-onnx). Upstream states NO licence for
  *         these recordings and gives no per-segment ground truth — only the
@@ -163,6 +173,13 @@ const USAGE = 'usage: node scripts/fetch-diarization-assets.cjs [--assets=<dir>]
  * must not be read as "fetch everything into the default tree" — that is a
  * 37 MB download the caller did not ask for. `--assets` without a value is the
  * same mistake in the other direction, and `--verify=<anything>` the third.
+ *
+ * An EMPTY value is a MISSING value: `--assets=` is what an unset shell
+ * variable expands to, and `path.resolve('')` is the CWD, not the default
+ * tree. Accepted, it puts the 32.5 MB model set and the non-redistributable
+ * recordings in `<cwd>/models/diarization/` and `<cwd>/diarization/` —
+ * outside the one directory .gitignore covers (`test-assets/`), where the
+ * next `git add -A` sweeps them into the repo.
  */
 function flagProblem(argv) {
   for (const a of argv) {
@@ -170,7 +187,7 @@ function flagProblem(argv) {
     if (!KNOWN_FLAGS.has(name)) {
       return `fetch-diarization-assets: unknown option ${name}\n${USAGE}`;
     }
-    if (VALUE_FLAGS.has(name) && !a.includes('=')) {
+    if (VALUE_FLAGS.has(name) && (!a.includes('=') || a.slice(a.indexOf('=') + 1) === '')) {
       return `fetch-diarization-assets: ${name} needs a value, as ${name}=<dir>\n`;
     }
     if (BOOLEAN_FLAGS.has(name) && a.includes('=')) {

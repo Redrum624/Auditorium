@@ -274,6 +274,13 @@ describe('buildBaseline', () => {
     expect(Object.keys(out.tables)).toEqual(['direct', 'fullChain']);
   });
 
+  it('stamps the measured table with the machine that timed it, not only the file', () => {
+    // Timings are meaningless without the machine (this script's own header
+    // says so) — and a table OUTLIVES the run that wrote the file around it
+    // when the next run carries it, so the stamp travels with the table.
+    expect(baseline().tables.direct.machine).toEqual(machine);
+  });
+
   it('records the policy constants the numbers were produced under', () => {
     expect(baseline().policy).toEqual({
       threshold: 0.55,
@@ -406,6 +413,34 @@ describe('fetch-diarization-assets.cjs', () => {
     const assets = path.join(ROOT, 'test-assets');
     expect(fetcher.modelDestinations(assets)).toEqual(getDiarizeModelPaths(assets));
   });
+
+  /**
+   * The header pairs a recording with a duration, and that pairing is how a
+   * reader knows what the bench's ~162 s of material is made of. Written as
+   * four names followed by four numbers it went silently positional against
+   * design-notes.md's own (unsorted) order: 0-four — 56.9 s read as 16.0 s,
+   * and 3-two — 54.8 s read as 56.9 s. Each name carries its own number now,
+   * and the truth it is checked against is the bench's MEASURED audioSeconds.
+   */
+  it('pairs each recording with its own measured duration in the header', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'scripts', 'fetch-diarization-assets.cjs'), 'utf8');
+    const stated = new Map(
+      [...source.matchAll(/^\s*\*\s+(\d-[a-z]+-speakers-[a-z]+\.wav)\s+—\s+([\d.]+) s\r?$/gm)].map((m) => [
+        m[1],
+        Number(m[2]),
+      ])
+    );
+    const measured = new Map(
+      JSON.parse(fs.readFileSync(path.join(ROOT, 'docs', 'bench', 'diarize-bench-baseline.json'), 'utf8'))
+        .tables.direct.rows.filter((r) => r.status === 'ok')
+        .map((r) => [r.file, r.audioSeconds])
+    );
+    expect([...stated.keys()].sort()).toEqual(fetcher.RECORDINGS.map((r) => r.filename));
+    for (const [filename, seconds] of stated) {
+      expect(measured.has(filename)).toBe(true);
+      expect(seconds).toBeCloseTo(measured.get(filename), 1);
+    }
+  });
 });
 
 // ------------------------------------------------------------- flag parsing
@@ -438,6 +473,21 @@ describe('flagProblem', () => {
     expect(bench.flagProblem(['--sideways'])).toMatch(/unknown option --sideways/);
     expect(fetcher.flagProblem(['--assets'])).toMatch(/--assets needs a value/);
     expect(fetcher.flagProblem(['--fetch-everything'])).toMatch(/unknown option --fetch-everything/);
+  });
+
+  /**
+   * `--assets=` is what an unset shell variable expands to, and it does NOT
+   * mean "use the default": `path.resolve('')` is the CWD, so the fetcher
+   * would pull the 32.5 MB model set and the non-redistributable recordings
+   * into `<cwd>/models/diarization/` and `<cwd>/diarization/` — neither of
+   * which .gitignore covers (it ignores `test-assets/` only). An empty value
+   * is a missing value.
+   */
+  it('refuses a value flag written with an empty value, which resolves to the CWD', () => {
+    expect(fetcher.flagProblem(['--assets='])).toMatch(/--assets needs a value/);
+    expect(fetcher.flagProblem(['--assets=', '--verify'])).toMatch(/--assets needs a value/);
+    expect(bench.flagProblem(['--assets='])).toMatch(/--assets needs a value/);
+    expect(bench.flagProblem(['--out='])).toMatch(/--out needs a value/);
   });
 });
 
@@ -537,6 +587,50 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
     });
     expect(out.tables.direct.rows).toEqual([skippedRow()]);
     expect(out.tables.direct.carriedFrom).toBeUndefined();
+  });
+
+  /**
+   * The failure this pins: a carried table keeps the rows machine A measured
+   * while the file around it is stamped with machine B's `machine` block — B
+   * signing A's timings, with nothing in the file to say otherwise, because
+   * there was no per-table machine at all. The stamp travels with the table.
+   */
+  it('keeps the carried table stamped with the machine that measured it', () => {
+    const other = { ...MACHINE_FIXTURE, cpu: 'Xeon Gold 6248 (CI runner)', cpus: 40, memGb: 192 };
+    const previous = bench.buildBaseline({
+      generated: '2026-09-05T20:00:00.000Z',
+      machine: other,
+      models: MODELS_FIXTURE,
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: true, rows: [okRow({ file: '3-two-speakers-en.wav', audioSeconds: 54.8 })] },
+    });
+    const out = rerun({
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+      previous,
+    });
+    expect(out.machine).toEqual(MACHINE_FIXTURE);
+    expect(out.tables.direct.machine).toEqual(MACHINE_FIXTURE);
+    expect(out.tables.fullChain.machine).toEqual(other);
+    expect(out.tables.fullChain.rows).toEqual(previous.tables.fullChain.rows);
+  });
+
+  it('falls back to the previous FILE machine for a table written before the stamp existed', () => {
+    // A baseline from before the per-table stamp has no machine on its tables,
+    // and the only attribution it carries for them is the file's own machine
+    // block — which is where those timings actually came from.
+    const other = { ...MACHINE_FIXTURE, cpu: 'Xeon Gold 6248 (CI runner)', cpus: 40, memGb: 192 };
+    const legacy = committedBaseline();
+    legacy.machine = other;
+    delete legacy.tables.direct.machine;
+    delete legacy.tables.fullChain.machine;
+    const out = rerun({
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+      previous: legacy,
+    });
+    expect(out.tables.fullChain.machine).toEqual(other);
+    expect(out.tables.direct.machine).toEqual(MACHINE_FIXTURE);
   });
 });
 
@@ -681,20 +775,19 @@ function linkedAssetsRoot(prefix) {
     const root = linkedAssetsRoot('bench-empty-');
     roots.push(root);
     const out = path.join(root, 'out.json');
-    const before = committedBaseline();
-    fs.writeFileSync(out, `${JSON.stringify(before, null, 2)}\n`);
+    const before = `${JSON.stringify(committedBaseline(), null, 2)}\n`;
+    fs.writeFileSync(out, before);
 
     const res = runScript('diarize-bench.cjs', [`--assets=${root}`, `--out=${out}`, '--direct']);
     expect(res.code).toBe(1);
     expect(`${res.stdout}${res.stderr}`).toContain('--direct ran but measured nothing');
 
-    // The committed verdict survives a run that measured nothing — both
-    // tables, with the run that produced them named.
-    const after = JSON.parse(fs.readFileSync(out, 'utf8'));
-    expect(after.tables.direct.rows).toEqual(before.tables.direct.rows);
-    expect(after.tables.fullChain.rows).toEqual(before.tables.fullChain.rows);
-    expect(after.tables.direct.carriedFrom).toBe(before.generated);
-    expect(after.generated).not.toBe(before.generated);
+    // A run that measured nothing has nothing to publish, so it does not
+    // touch the verdict at ALL — not the tables, and above all not
+    // `generated`, the one field that would make an untouched table read
+    // as freshly measured on whatever machine ran the empty pass.
+    expect(fs.readFileSync(out, 'utf8')).toBe(before);
+    expect(res.stdout).toContain('left as it was');
   }, 120000);
 
   (RECORDING_PRESENT ? it : it.skip)(
@@ -715,6 +808,42 @@ function linkedAssetsRoot(prefix) {
       const written = JSON.parse(fs.readFileSync(out, 'utf8'));
       expect(written.tables.direct.correct).toBe(0);
       expect(written.tables.direct.measured).toBe(1);
+    },
+    300000
+  );
+
+  (RECORDING_PRESENT ? it : it.skip)(
+    'exits 0 and publishes a FRESH table when every --direct count matches its name',
+    () => {
+      // The other side of the exit rule. Without it a bench mutated to
+      // `return 1` — one that fails even on a fully correct run — leaves this
+      // suite green, and the exit code is the only part of a bench a gate
+      // reads. Same recording as the mislabelled case above, under its OWN
+      // name, so this pays the same one-file real-host cost.
+      const root = linkedAssetsRoot('bench-correct-');
+      roots.push(root);
+      fs.linkSync(TWO_SPEAKER_WAV, path.join(root, 'diarization', '1-two-speakers-en.wav'));
+      const out = path.join(root, 'out.json');
+      const before = committedBaseline();
+      fs.writeFileSync(out, `${JSON.stringify(before, null, 2)}\n`);
+
+      const res = runScript('diarize-bench.cjs', [`--assets=${root}`, `--out=${out}`, '--direct']);
+      expect(res.code).toBe(0);
+      expect(res.stderr).not.toContain('diarize-bench:');
+
+      const after = JSON.parse(fs.readFileSync(out, 'utf8'));
+      const measured = after.tables.direct.rows.filter((r) => r.status === 'ok');
+      expect(measured.map((r) => r.file)).toEqual(['1-two-speakers-en.wav']);
+      expect(after.tables.direct.correct).toBe(1);
+      expect(after.tables.direct.measured).toBe(1);
+      expect(after.tables.direct.carriedFrom).toBeUndefined();
+      expect(after.generated).not.toBe(before.generated);
+      // Each table names the machine that timed it: this run's rows carry
+      // this machine, the carried rows keep the one that measured them.
+      expect(after.tables.direct.machine).toEqual(after.machine);
+      expect(after.tables.fullChain.carriedFrom).toBe(before.generated);
+      expect(after.tables.fullChain.machine).toEqual(MACHINE_FIXTURE);
+      expect(after.machine.cpu).not.toBe(MACHINE_FIXTURE.cpu);
     },
     300000
   );
@@ -739,6 +868,16 @@ describe('the fetcher CLI', () => {
     expect(res.stdout).toContain('MISSING');
     expect(res.stdout).toContain('6 asset(s) missing or off their pin');
     expect(fs.readdirSync(tmp)).toEqual([]);
+  }, 60000);
+
+  it('refuses --assets= instead of resolving it to the CWD and fetching there', () => {
+    // `--verify` keeps this harmless either way; what it pins is the exit
+    // code and the message, i.e. that the empty value is rejected BEFORE any
+    // path resolution — the same argv without `--verify` is a 37 MB download
+    // into the repo.
+    const res = runScript('fetch-diarization-assets.cjs', ['--assets=', '--verify']);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('--assets needs a value');
   }, 60000);
 
   it('refuses --verify=true instead of turning the read-only check into a fetch', () => {

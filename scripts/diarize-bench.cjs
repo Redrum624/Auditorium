@@ -33,13 +33,16 @@
  *
  * Output: this table on stdout plus `docs/bench/diarize-bench-baseline.json`
  * (both tables, the model pins that produced them, and the machine — timings
- * are meaningless without it). A run publishes only the tables it MEASURED:
- * the mode it did not run keeps whatever the file already held, stamped with
- * the run that produced it (`carriedFrom`), because `--out` defaults to that
- * committed file and a one-mode run must not blank the other half of the
- * verdict. And a run that measured nothing — no recording on this machine, or
- * `--full-chain` alone with the 165 MB model absent — exits 1 rather than
- * reporting an empty table as a success. `SPEAKER_SEPARATION_LIMITS` and
+ * are meaningless without it, so EACH TABLE names the machine that timed it,
+ * not only the file). A run publishes only the tables it MEASURED: the mode
+ * it did not run keeps whatever the file already held — its rows, its own
+ * machine, and a `carriedFrom` stamp naming the run that produced them —
+ * because `--out` defaults to that committed file and a one-mode run must not
+ * blank the other half of the verdict. And a run that measured nothing — no
+ * recording on this machine, or `--full-chain` alone with the 165 MB model
+ * absent — exits 1 AND leaves the file exactly as it was: it has nothing to
+ * publish, and rewriting `generated` alone would date another machine's
+ * numbers to this run. `SPEAKER_SEPARATION_LIMITS` and
  * `KNOWN_LIMITATIONS.md` cite that file, so what it does NOT establish is
  * written into it: four recordings, ~162 s in total, count-only truth (no
  * RTTM, no DER), one four-speaker file and it is Mandarin under an
@@ -251,7 +254,14 @@ function countMismatches(rows) {
     .map((r) => ({ file: r.file, truth: r.truth, found: r.speakerCount }));
 }
 
-function tableOf(mode, table) {
+/**
+ * One mode's table. The machine is stamped INTO the table and not only onto
+ * the file, because a table OUTLIVES the run that wrote the file around it:
+ * `publishedTable` carries a table this run did not produce, and the file-level
+ * block would then sign another machine's timings. A table that measured
+ * nothing carries no stamp — there is nothing to attribute.
+ */
+function tableOf(mode, table, machine) {
   const rows = table.rows || [];
   const measured = rows.filter((r) => r.status === 'ok');
   return {
@@ -259,6 +269,7 @@ function tableOf(mode, table) {
     description: MODE_TITLES[mode],
     ran: Boolean(table.ran),
     ...(table.notRunReason ? { notRunReason: table.notRunReason } : {}),
+    ...(measured.length > 0 && machine ? { machine } : {}),
     counts: measured.map((r) => r.speakerCount),
     truth: measured.map((r) => r.truth),
     correct: measured.filter((r) => r.speakerCount === r.truth).length,
@@ -280,12 +291,17 @@ function tableOf(mode, table) {
  * and a carried table says whose numbers it is and why this run did not
  * produce its own, so it can never read as fresh.
  */
-function publishedTable(mode, produced, previousTable, previousGenerated) {
-  const fresh = tableOf(mode, produced || {});
+function publishedTable(mode, produced, previousTable, previousGenerated, machine, previousMachine) {
+  const fresh = tableOf(mode, produced || {}, machine);
   if (fresh.measured > 0) return fresh;
   if (!previousTable || previousTable.ran !== true || !(previousTable.measured > 0)) return fresh;
   return {
     ...previousTable,
+    // The machine that MEASURED these rows travels with them. A baseline
+    // written before that stamp existed has none on its tables, and the only
+    // attribution it carries for them is the machine block of the file they
+    // came from — which is where those timings were produced.
+    machine: previousTable.machine ?? previousMachine ?? null,
     carriedFrom: previousGenerated ?? null,
     carriedReason:
       fresh.notRunReason ?? `this run measured nothing — ${fresh.skipped} recording(s) skipped`,
@@ -296,12 +312,15 @@ function publishedTable(mode, produced, previousTable, previousGenerated) {
  * The committed verdict. Everything a reader needs to judge the numbers
  * WITHOUT re-running: the policy constants they were produced under, the model
  * files that produced them, the machine that timed them, and what the truth is
- * (and is not). `previous` is the baseline this one replaces, when there is
- * one — see `publishedTable`.
+ * (and is not). The file-level `machine` is THIS run; the machine each set of
+ * timings was measured on sits on its own table, which is the one that stays
+ * true when a table is carried. `previous` is the baseline this one replaces,
+ * when there is one — see `publishedTable`.
  */
 function buildBaseline({ generated, machine, models, direct, fullChain, previous = null, policy = POLICY }) {
   const previousTables = (previous && typeof previous === 'object' && previous.tables) || null;
   const previousGenerated = previous && typeof previous === 'object' ? previous.generated : null;
+  const previousMachine = (previous && typeof previous === 'object' && previous.machine) || null;
   return {
     script: 'scripts/diarize-bench.cjs',
     generated,
@@ -314,12 +333,21 @@ function buildBaseline({ generated, machine, models, direct, fullChain, previous
     models,
     machine,
     tables: {
-      direct: publishedTable('--direct', direct, previousTables && previousTables.direct, previousGenerated),
+      direct: publishedTable(
+        '--direct',
+        direct,
+        previousTables && previousTables.direct,
+        previousGenerated,
+        machine,
+        previousMachine
+      ),
       fullChain: publishedTable(
         '--full-chain',
         fullChain,
         previousTables && previousTables.fullChain,
-        previousGenerated
+        previousGenerated,
+        machine,
+        previousMachine
       ),
     },
   };
@@ -725,7 +753,9 @@ function flagProblem(argv) {
   for (const a of argv) {
     const name = a.split('=')[0];
     if (!KNOWN_FLAGS.has(name)) return `diarize-bench: unknown option ${name}\n${USAGE}`;
-    if (VALUE_FLAGS.has(name) && !a.includes('=')) {
+    // An EMPTY value is a MISSING one: `--out=` is what an unset shell variable
+    // expands to, and `path.resolve('')` is the CWD, not the default.
+    if (VALUE_FLAGS.has(name) && (!a.includes('=') || a.slice(a.indexOf('=') + 1) === '')) {
       return `diarize-bench: ${name} needs a value, as ${name}=<path>\n`;
     }
     if (BOOLEAN_FLAGS.has(name) && a.includes('=')) {
@@ -817,6 +847,21 @@ async function main() {
     for (const line of reportLines(mode, rows)) log(line);
   }
 
+  const outLabel = path.relative(ROOT, outPath) || outPath;
+
+  // Half the exit rule (D6) is decided BEFORE the write: a run that measured
+  // nothing confirms nothing, so it neither reports success nor publishes.
+  // Stamping a fresh `generated` over tables it did not produce would date
+  // another machine's numbers to this run, and `generated` is what a reader
+  // uses to tell a fresh table from a carried one.
+  const empty = unmeasuredFailures(modes, tables);
+  for (const failure of empty) process.stderr.write(`diarize-bench: ${failure}\n`);
+  if (empty.length > 0) {
+    log('');
+    log(`nothing measured — ${outLabel} left as it was`);
+    return 1;
+  }
+
   const baseline = buildBaseline({
     generated: new Date().toISOString(),
     machine: machineInfo(),
@@ -828,17 +873,15 @@ async function main() {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(baseline, null, 2)}\n`);
   log('');
-  log(`wrote ${path.relative(ROOT, outPath) || outPath}`);
+  log(`wrote ${outLabel}`);
   for (const key of ['direct', 'fullChain']) {
-    const carried = baseline.tables[key].carriedFrom;
-    if (carried) log(`  ${key}: kept the table measured at ${carried} (${baseline.tables[key].carriedReason})`);
+    const table = baseline.tables[key];
+    if (!table.carriedFrom) continue;
+    const where = table.machine && table.machine.cpu ? table.machine.cpu : 'an unrecorded machine';
+    log(`  ${key}: kept the table measured at ${table.carriedFrom} on ${where} (${table.carriedReason})`);
   }
 
-  // The exit rule (D6): only --direct is judged against the file-name truth —
-  // plus a run that measured nothing at all, which confirms nothing and must
-  // not report success.
-  const empty = unmeasuredFailures(modes, tables);
-  for (const failure of empty) process.stderr.write(`diarize-bench: ${failure}\n`);
+  // The other half: only --direct is judged against the file-name truth.
   const mismatches = countMismatches(tables.direct.rows);
   if (mismatches.length > 0) {
     process.stderr.write(
@@ -846,7 +889,7 @@ async function main() {
         `${mismatches.map((m) => `${m.file}: found ${m.found}, name says ${m.truth}`).join('; ')}\n`
     );
   }
-  return empty.length > 0 || mismatches.length > 0 ? 1 : 0;
+  return mismatches.length > 0 ? 1 : 0;
 }
 
 if (require.main === module) {
