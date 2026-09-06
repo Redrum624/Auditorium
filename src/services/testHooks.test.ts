@@ -13,6 +13,7 @@
 
 import {
   installTestHooks,
+  peakOutsideSpans,
   syntheticSpeakerEvidence,
   HOOK_TURN_FRAMES,
   type TestApi,
@@ -44,6 +45,8 @@ import {
   _resetSessionLaneWidth,
 } from '../multitrack/sessionViewport';
 import {
+  assembleDiarization,
+  segmentsToDocSamples,
   FRAME_SHIFT,
   MIN_CLUSTER_SIZE,
   MIN_EMBED_FRAMES,
@@ -51,6 +54,7 @@ import {
   SEG_SHIFT,
   SEG_WINDOW,
 } from '../dsp/diarization';
+import * as spanMask from '../dsp/spanMask';
 import { cancelDiarization } from './diarizeService';
 import {
   classWindow,
@@ -1359,6 +1363,24 @@ describe('separateSpeakersLand (D4/D6)', () => {
   const docSamplesForWindows = (windows: number): number =>
     ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
 
+  /** The worst |sample| over a document's channels. The expected peaks below
+   *  are derived from the FIXTURE through this rather than written down: the
+   *  source's own peak, times the stem weight the landing carries. */
+  const peakOf = (channels: readonly Float32Array[]): number => {
+    let peak = 0;
+    for (const ch of channels) {
+      for (let i = 0; i < ch.length; i++) if (Math.abs(ch[i]) > peak) peak = Math.abs(ch[i]);
+    }
+    return peak;
+  };
+
+  /** `syntheticSeparation`'s Vocals weight (`testHooks.ts`), the one stem a
+   *  speaker document is made of. Written out HERE on purpose rather than
+   *  imported: pinning the number the fixture is supposed to use is what makes
+   *  a permutation of those four weights — the wrong-stem landing the fixture's
+   *  docblock names — fail instead of landing quietly. */
+  const VOCALS_WEIGHT = 0.19;
+
   /** Distinct, non-trivial content per channel, as `addVoiceDoc` above: a
    *  landing measured on silence would pass with the mask inverted. */
   function addSpeakerDoc(name = 'talk.wav', samples = 2 * 44100, channelCount = 2): AudioDocument {
@@ -1424,20 +1446,77 @@ describe('separateSpeakersLand (D4/D6)', () => {
 
   it('every speaker document is silent outside that speakers turns and carries audio inside them', () => {
     const t = api();
-    addSpeakerDoc('talk.wav');
+    const source = addSpeakerDoc('talk.wav');
 
     const summary = t.separateSpeakersLand(2);
 
     // The two halves of the mask, and both are needed: a landing that zeroed
     // the WHOLE document would also report 0 outside the spans.
+    //
+    // Inside the turns it is the VALUE that is pinned, not the sign. A speaker
+    // document is the Vocals stem of an exact partition of the source, so its
+    // peak is that weight times the source's own — measured off the fixture
+    // here. "> 0" passes on any constant at all, and it passes on a landing
+    // that took the wrong stem (0.37x, 0.23x or 0.11x).
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
     expect(summary.outsideSpansPeak).toBe(0);
     expect(summary.speakerPeaks).toHaveLength(2);
-    for (const peak of summary.speakerPeaks) expect(peak).toBeGreaterThan(0);
+    for (const peak of summary.speakerPeaks) expect(peak).toBeCloseTo(stemPeak, 6);
     // Turns, not one span each: the fixture alternates, so the first speaker
     // gets two turns and the second one.
     expect(summary.segmentCounts).toEqual([2, 1]);
     expect(summary.speechSeconds).toHaveLength(2);
     for (const s of summary.speechSeconds) expect(s).toBeGreaterThan(0);
+  });
+
+  it('measures what is outside the turns rather than reporting a zero of its own', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    const length = source.channels[0].length;
+
+    const summary = t.separateSpeakersLand(2);
+
+    // 0 is also the value the field would carry if the measurement had never
+    // run, so the measurement is put on BOTH sides of that identity: the same
+    // landed channels, with the spans moved off the audio. Speaker 1's document
+    // against speaker 2's turns holds every one of its samples OUTSIDE the
+    // spans and has to report its whole peak; against its own turns it has to
+    // report silence. The spans come from the shipped chain the hook itself
+    // runs, not from a hand-written list.
+    const spans = segmentsToDocSamples(
+      assembleDiarization(syntheticSpeakerEvidence(length, 44100), { speakerCount: 2 }),
+      44100,
+      length
+    );
+    const speaker1 = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'talk.wav — Speaker 1');
+    expect(speaker1).toBeDefined();
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+    expect(peakOutsideSpans(speaker1!.channels, spans[1])).toBeCloseTo(stemPeak, 6);
+    expect(peakOutsideSpans(speaker1!.channels, spans[0])).toBe(0);
+    expect(summary.outsideSpansPeak).toBe(0);
+  });
+
+  it('reports the audio a mask leaves behind, which is what makes that 0 evidence', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    // The shipped mask always silences the gaps, so through this hook the field
+    // can only ever read 0 — and a summary that hard-coded the 0 would look the
+    // same. So the mask is TAKEN AWAY (`keepSpans` becomes a pass-through: the
+    // one thing D4's landing does to the stem) and the hook has to report the
+    // stem it was handed, outside the turns and all.
+    const spy = jest
+      .spyOn(spanMask, 'keepSpans')
+      .mockImplementation((channels) => channels.map((ch) => Float32Array.from(ch)));
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(spy).toHaveBeenCalled();
+    expect(summary.outsideSpansPeak).toBeCloseTo(
+      Math.fround(VOCALS_WEIGHT * peakOf(source.channels)),
+      6
+    );
   });
 
   it('routes a MONO source as dual-mono across every landed track, and says so', () => {
@@ -1818,9 +1897,9 @@ describe('getDiarizeModelState / diarizeActive (D6)', () => {
     addStemDoc('stem.wav', docSamplesForWindows(1));
     // `Date.now` is the hook's only clock, and a real run here finishes inside
     // one millisecond — so the elapsed figure would read 0, which is also the
-    // value the unwired seed carries. A monotonic stub makes it a measured
-    // DIFFERENCE: whatever the hook reports has to come from subtracting two
-    // clock reads it took itself.
+    // value the unwired seed carries. The stub advances 250 ms PER READ, which
+    // turns the figure into a count of the clock reads the run takes between
+    // the hook's own two.
     let clock = 1_000_000;
     jest.spyOn(Date, 'now').mockImplementation(() => (clock += 250));
 
@@ -1830,8 +1909,14 @@ describe('getDiarizeModelState / diarizeActive (D6)', () => {
     const summary = await promise;
 
     expect(summary.ok).toBe(true);
-    expect(Number.isFinite(summary.elapsedMs)).toBe(true);
-    expect(summary.elapsedMs).toBeGreaterThanOrEqual(250);
+    // The measured figure, not a floor: ">= 250" is also satisfied by a hook
+    // that reported an absolute clock read (~1,000,750 under this stub) and by
+    // one whose two reads sat back to back around no work at all (250). 3,250
+    // is the span of the whole run: 250 ms times the thirteen reads that
+    // separate the hook's two, twelve of which the run itself takes. A change
+    // in it is a real change in what the reported window covers, to be
+    // re-measured rather than re-tuned.
+    expect(summary.elapsedMs).toBe(3250);
   });
 
   it('reports a missing model set without spawning anything', async () => {

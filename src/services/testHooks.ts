@@ -105,6 +105,7 @@ import {
 } from './voiceService';
 import { formatSrt, formatWebVtt } from './subtitleFormat';
 import { landSpeakers, landStems, landVoice } from './stemLanding';
+import type { SampleSpan } from '../dsp/spanMask';
 import {
   assembledFrameCount,
   assembleDiarization,
@@ -1348,6 +1349,13 @@ async function runTranscriptionHook(
  * than zeros: a fixture whose stems were all the same fraction would land
  * identically with any two of them swapped — the Voice would be 0.37x rather
  * than 0.19x and nothing would notice.
+ *
+ * The ORDER is pinned as well as the spread, because the spread alone is only
+ * an argument. `landVoice` and `landSpeakers` pick the stem by LABEL, and
+ * `weights[i]` is paired with `STEM_LABELS[i]` below, so a permutation of these
+ * four numbers IS the wrong-stem landing this paragraph names — and it is
+ * caught in `testHooks.test.ts`, where a landed speaker document's peak is
+ * measured against 0.19x the source's own rather than merely against zero.
  */
 function syntheticSeparation(source: AudioDocument, length: number): StemSeparationOutput {
   const weights = [0.37, 0.23, 0.19, 0.11]; // Drums, Bass, Vocals, Other
@@ -1489,6 +1497,57 @@ export function syntheticSpeakerEvidence(lengthSamples: number, sampleRate: numb
     }
   }
   return { totalSamples16k, windows, embeddings };
+}
+
+/** The worst |sample| over every channel of a landed document. */
+function channelsPeak(channels: readonly Float32Array[]): number {
+  let peak = 0;
+  for (const ch of channels) {
+    for (let i = 0; i < ch.length; i++) {
+      const v = Math.abs(ch[i]);
+      if (v > peak) peak = v;
+    }
+  }
+  return peak;
+}
+
+/**
+ * D4/D6 — the worst |sample| `channels` carry OUTSIDE `spans`: the head before
+ * the first span, the gaps between them, and the tail after the last.
+ * `keepSpans` zeroes every sample there, so on a speaker document measured
+ * against that speaker's own turns this reads 0, and anything above zero is
+ * audio the mask failed to remove.
+ *
+ * EXPORTED for its own tests, for the reason `syntheticSpeakerEvidence` is:
+ * the number it produces inside `separateSpeakersLand` is 0 whenever the
+ * shipped mask works, and a lone 0 cannot tell "the mask silenced everything
+ * outside the turns" from "nothing was measured". The measurement is only
+ * pinned on BOTH sides of that identity by running it here on channels whose
+ * audio lies OUTSIDE the spans it is handed — the other speaker's turns over
+ * the same landed document — where it has to report that document's own peak.
+ */
+export function peakOutsideSpans(
+  channels: readonly Float32Array[],
+  spans: readonly SampleSpan[]
+): number {
+  const ordered = [...spans].sort((a, b) => a.startSample - b.startSample);
+  let outside = 0;
+  for (const ch of channels) {
+    let cursor = 0;
+    for (const s of ordered) {
+      const stop = Math.min(s.startSample, ch.length);
+      for (let i = cursor; i < stop; i++) {
+        const v = Math.abs(ch[i]);
+        if (v > outside) outside = v;
+      }
+      if (s.endSample > cursor) cursor = s.endSample;
+    }
+    for (let i = cursor; i < ch.length; i++) {
+      const v = Math.abs(ch[i]);
+      if (v > outside) outside = v;
+    }
+  }
+  return outside;
 }
 
 /**
@@ -2798,31 +2857,11 @@ export function installTestHooks(): void {
           speakerPeaks.push(0);
           continue;
         }
-        const spans = [...docSpans[k]].sort((a, b) => a.startSample - b.startSample);
-        let peak = 0;
-        for (const ch of doc.channels) {
-          for (let i = 0; i < ch.length; i++) {
-            const v = Math.abs(ch[i]);
-            if (v > peak) peak = v;
-          }
-          // The gaps between this speaker's own turns, then the tail after the
-          // last one: `keepSpans` zeroes every sample there, so anything above
-          // zero is audio the mask failed to remove.
-          let cursor = 0;
-          for (const s of spans) {
-            const stop = Math.min(s.startSample, ch.length);
-            for (let i = cursor; i < stop; i++) {
-              const v = Math.abs(ch[i]);
-              if (v > outside) outside = v;
-            }
-            if (s.endSample > cursor) cursor = s.endSample;
-          }
-          for (let i = cursor; i < ch.length; i++) {
-            const v = Math.abs(ch[i]);
-            if (v > outside) outside = v;
-          }
-        }
-        speakerPeaks.push(peak);
+        // Both halves of the mask, through the measurement whose own test pins
+        // it on both sides of its identity (`peakOutsideSpans`): what this
+        // speaker's turns kept, and what everything else was taken down to.
+        speakerPeaks.push(channelsPeak(doc.channels));
+        outside = Math.max(outside, peakOutsideSpans(doc.channels, docSpans[k]));
       }
 
       return {
