@@ -36,6 +36,7 @@ import {
   totalFrameCount,
   windowStartFrame,
   type Diarization,
+  type DiarizationSegment,
   type DiarizationEvidence,
 } from './diarization';
 import { unitVector } from './testVectors';
@@ -100,6 +101,48 @@ function windowOf(runs: readonly [cls: number, from: number, to: number][]): Uin
   const w = new Uint8Array(SEG_FRAMES);
   for (const [cls, from, to] of runs) for (let f = from; f < to; f++) w[f] = cls;
   return w;
+}
+
+/** One window's class bytes from its LOCAL SLOTS: `[local, from, to)` in
+ * GLOBAL frames. Unlike `evidenceFromTimeline` this builds each window on its
+ * own, so two windows may disagree about a frame — which is what the real
+ * model does (`powerset_max_classes` is 2, so a three-way overlap forces each
+ * window to pick a different pair) and the only way to pin what the per-frame
+ * vote does across a window boundary. */
+function windowFromSlots(windowIndex: number, slots: readonly [local: number, from: number, to: number][]): Uint8Array {
+  const start = windowStartFrame(windowIndex);
+  const w = new Uint8Array(SEG_FRAMES);
+  for (let f = 0; f < SEG_FRAMES; f++) {
+    const g = start + f;
+    const active = [...new Set(slots.filter(([, a, b]) => g >= a && g < b).map(([l]) => l))].sort((a, b) => a - b);
+    const cls = POWERSET.findIndex((set) => set.length === active.length && set.every((v, k) => v === active[k]));
+    if (cls < 0) throw new Error(`window ${windowIndex} frame ${g}: locals ${active} are not a powerset class`);
+    w[f] = cls;
+  }
+  return w;
+}
+
+/**
+ * Four unit vectors realising a named cosine-distance table: a tight pair
+ * P1/P2, a P3 equidistant from both, and a singleton Q. Sizes 3 vs 1 are the
+ * smallest case where size-weighted (UPGMA) linkage and a plain mean of the
+ * two children (WPGMA) part company, so a fixture that discriminates them
+ * needs a cluster of three — every equal-size merge makes the two rules agree.
+ */
+function threeAndOne(dPair: number, dToP3: number, dPQ: number, dP3Q: number): Float32Array[] {
+  const c = Math.sqrt((2 - dPair) / 2); // cos(P1,P2) = 2c² − 1 = 1 − dPair
+  const s = Math.sqrt(1 - c * c);
+  const p = (1 - dToP3) / c; // cos(P1,P3) = cos(P2,P3) = c·p
+  const q = Math.sqrt(1 - p * p);
+  const u = (1 - dPQ) / c; // cos(P1,Q) = cos(P2,Q) = c·u
+  const v = (1 - dP3Q - p * u) / q; // cos(P3,Q) = p·u + q·v
+  const w = Math.sqrt(1 - u * u - v * v);
+  return [
+    new Float32Array([c, s, 0, 0]),
+    new Float32Array([c, -s, 0, 0]),
+    new Float32Array([p, 0, q, 0]),
+    new Float32Array([u, 0, v, w]),
+  ];
 }
 
 interface SpeakerLine {
@@ -411,6 +454,42 @@ describe('agglomerateAverage', () => {
     expect(clusterCount).toBe(1);
   });
 
+  // (b″) The Lance–Williams update is SIZE-WEIGHTED (UPGMA):
+  //   D(I∪J, K) = (nI·D(I,K) + nJ·D(J,K)) / (nI + nJ).
+  // Every fixture above merges equal-size groups, where that collapses to the
+  // plain mean (WPGMA) — so none of them can tell the shipped rule from the
+  // likeliest wrong one. These two do: a 3-member cluster against a singleton,
+  // with the two rules straddling 0.55 in BOTH directions. Merge order is
+  // forced by the distances (P1+P2 at 0.05, then P3 at 0.10, then Q), so after
+  // the second merge UPGMA reads (2·d(P,Q) + d(P3,Q))/3 while WPGMA reads
+  // (d(P,Q) + d(P3,Q))/2.
+  it('(b″) size-weighted linkage merges a 3-member cluster a plain mean would keep apart', () => {
+    const [p1, p2, p3, q] = threeAndOne(0.05, 0.1, 0.4, 0.75);
+    expect(cosineDistance(p1, p2)).toBeCloseTo(0.05, 5);
+    expect(cosineDistance(p1, p3)).toBeCloseTo(0.1, 5);
+    expect(cosineDistance(p2, p3)).toBeCloseTo(0.1, 5);
+    expect(cosineDistance(p1, q)).toBeCloseTo(0.4, 5);
+    expect(cosineDistance(p2, q)).toBeCloseTo(0.4, 5);
+    expect(cosineDistance(p3, q)).toBeCloseTo(0.75, 5);
+    expect((2 * 0.4 + 0.75) / 3).toBeLessThanOrEqual(DIARIZE_THRESHOLD); // UPGMA 0.5167
+    expect((0.4 + 0.75) / 2).toBeGreaterThan(DIARIZE_THRESHOLD); // WPGMA 0.575
+    const { labels, clusterCount } = agglomerateAverage([p1, p2, p3, q], { threshold: DIARIZE_THRESHOLD });
+    expect(clusterCount).toBe(1);
+    expect(labels).toEqual([0, 0, 0, 0]);
+  });
+
+  it('(b″) and keeps apart a singleton a plain mean would pull in', () => {
+    const [p1, p2, p3, q] = threeAndOne(0.05, 0.1, 0.7, 0.35);
+    expect(cosineDistance(p1, q)).toBeCloseTo(0.7, 5);
+    expect(cosineDistance(p2, q)).toBeCloseTo(0.7, 5);
+    expect(cosineDistance(p3, q)).toBeCloseTo(0.35, 5);
+    expect((2 * 0.7 + 0.35) / 3).toBeGreaterThan(DIARIZE_THRESHOLD); // UPGMA 0.5833
+    expect((0.7 + 0.35) / 2).toBeLessThanOrEqual(DIARIZE_THRESHOLD); // WPGMA 0.525
+    const { labels, clusterCount } = agglomerateAverage([p1, p2, p3, q], { threshold: DIARIZE_THRESHOLD });
+    expect(clusterCount).toBe(2);
+    expect(partition(labels)).toEqual([[0, 1, 2], [3]]);
+  });
+
   it('(c) threshold boundary on two pairs: cross 0.53 merges, cross 0.57 stays apart', () => {
     // Two TIGHT pairs (within-pair d ≈ 0.001, tilted into unused axes) whose
     // four cross distances average 1 − 0.9995·c: 0.5302 for c = 0.47 and
@@ -489,10 +568,22 @@ describe('agglomerateAverage', () => {
     expect(run1.labels[0]).toBe(0);
   });
 
-  it('(f) n = 1,300 unit vectors (the 15-minute cap) cluster in under 1,000 ms', () => {
+  it('(f) n = 1,300 unit vectors (the 15-minute cap) cluster into the four voices, well inside a smoke bound', () => {
     // Four voices at 256-d with per-dimension noise of ±0.05 (noise norm ≈
     // 0.46, so within-voice d ≈ 0.18 and cross-voice d ≈ 1): the real
     // shape — nearly every fragment merges, ~1,296 merges in all.
+    //
+    // The partition (four clusters) is the assertion that matters. The time is
+    // a SMOKE bound, not a benchmark: it exists to catch an algorithmic
+    // regression — dropping the nearest-neighbour cache turns each of ~1,296
+    // merges into a full O(n²) rescan, orders of magnitude more work — and it
+    // must not measure machine load. Measured here at 318–385 ms over nine
+    // isolated runs; review measured the SAME fixture at up to 1,909 ms inside
+    // a loaded `--maxWorkers=14` full-file run, which is why the original
+    // 1,000 ms pin failed two runs in five. 5,000 ms is ~13× the isolated
+    // median and ~2.6× that worst observed spike. The per-test timeout is
+    // raised past it so a slow machine fails the bound with its measurement
+    // rather than a bare jest timeout.
     const rand = lcg(2026);
     const vectors: Float32Array[] = [];
     for (let i = 0; i < 1300; i++) {
@@ -506,8 +597,8 @@ describe('agglomerateAverage', () => {
     const { clusterCount } = agglomerateAverage(vectors, { threshold: DIARIZE_THRESHOLD });
     const ms = performance.now() - t0;
     expect(clusterCount).toBe(4);
-    expect(ms).toBeLessThan(1000);
-  });
+    expect(ms).toBeLessThan(5000);
+  }, 30_000);
 
   it('degenerate inputs: none → none, one → one cluster', () => {
     expect(agglomerateAverage([], { threshold: DIARIZE_THRESHOLD })).toEqual({ labels: [], clusterCount: 0 });
@@ -821,6 +912,87 @@ describe('assembleDiarization', () => {
     expect(() => assembleDiarization({ ...ev, embeddings: [{ ...ev.embeddings[0], localSpeaker: 3 }] })).toThrow(/localSpeaker/);
     expect(() => assembleDiarization({ ...ev, windows: [ev.windows[0], new Uint8Array(10)] })).toThrow(/589/);
     expect(() => assembleDiarization(ev, { speakerCount: Number.NaN })).toThrow(/speakerCount/);
+  });
+});
+
+// -------------------------------------------------- the vote across windows
+
+describe('the per-frame vote across a window boundary', () => {
+  /**
+   * Every window covering a frame casts ONE vote per cluster it hears there
+   * (the reference's `relabels[i, j, t] = 1`, saturated per window however
+   * many local slots share the cluster, then `count[start:end] += this_chunk`
+   * once per window). So a cluster heard by two windows at the same global
+   * frame must score TWO — and the frame where two windows meet is exactly
+   * where a per-window saturation can leak into the next window and eat one.
+   *
+   * The fixture is a three-way overlap at frame 59 = `windowStartFrame(1)`,
+   * which the model cannot express (`powerset_max_classes` is 2), so the two
+   * windows resolve it differently — the realistic disagreement the vote
+   * exists to settle:
+   *   truth   X 30..70, T 42..68, Y 59..130
+   *   window 0 hears X 30..70 (slot 1), T 42..59 (slot 0), Y 60..130 (slot 2)
+   *   window 1 hears T 59..68 (slot 0, exactly MIN_EMBED_FRAMES), Y 59..130 (slot 1)
+   * Cluster ids are X = 0, Y = 1, T = 2, so T loses every tie: at frame 59 it
+   * is kept only by scoring 2 against their 1. Its whole segment turns on that
+   * one frame — 18 frames clears MIN_ON_S, 17 does not.
+   */
+  const TWO_WINDOW_SAMPLES = SEG_WINDOW + SEG_SHIFT;
+  const dim = 6;
+  const boundaryEvidence = (): DiarizationEvidence => ({
+    totalSamples16k: TWO_WINDOW_SAMPLES,
+    windows: [
+      windowFromSlots(0, [[0, 42, 60], [1, 30, 71], [2, 60, 131]]),
+      windowFromSlots(1, [[0, 59, 69], [1, 59, 131]]),
+    ],
+    embeddings: [
+      { windowIndex: 0, localSpeaker: 1, activeFrames: 41, vector: axis(dim, 0) }, // X
+      { windowIndex: 0, localSpeaker: 2, activeFrames: 71, vector: axis(dim, 1) }, // Y
+      { windowIndex: 0, localSpeaker: 0, activeFrames: 18, vector: axis(dim, 2) }, // T
+      { windowIndex: 1, localSpeaker: 0, activeFrames: MIN_EMBED_FRAMES, vector: axis(dim, 2) }, // T
+      { windowIndex: 1, localSpeaker: 1, activeFrames: 72, vector: axis(dim, 1) }, // Y
+    ],
+  });
+  /** X = 0, Y = 1, T = 2 — T last, so every tie at frame 59 goes against it. */
+  const BOUNDARY_LABELS = [0, 1, 2, 2, 1];
+
+  it('the boundary frame is shared and worth two speakers to both windows', () => {
+    const ev = boundaryEvidence();
+    expect(windowStartFrame(1)).toBe(59);
+    expect(assembledFrameCount(TWO_WINDOW_SAMPLES, 2)).toBe(652);
+    const spf = speakerCountPerFrame(ev.windows);
+    // window 0 hears {T, X} at 59 and window 1 hears {T, Y}: mean 2
+    expect(spf[59]).toBe(2);
+    expect(spf[58]).toBe(2);
+    expect(spf[60]).toBe(2);
+    // one frame decides whether T's segment survives MIN_ON_S
+    expect(18 * FRAME_S).toBeGreaterThanOrEqual(MIN_ON_S);
+    expect(17 * FRAME_S).toBeLessThan(MIN_ON_S);
+  });
+
+  it('a cluster heard by both windows at the boundary frame keeps it — and its segment', () => {
+    const floored = applyShareFloor(boundaryEvidence(), BOUNDARY_LABELS);
+    expect(floored.refit).toBe(false);
+    expect(floored.labels).toEqual(BOUNDARY_LABELS);
+    // T (cluster 2) spans 42..59 inclusive: 18 frames, 4,860 samples.
+    expect(floored.spans[2]).toEqual([{ start: f16(42), end: f16(60) }]);
+    expect(floored.spans[2][0].end - floored.spans[2][0].start).toBe(18 * FRAME_SHIFT);
+    // the two windows agree about the rest, and it is unaffected
+    expect(floored.spans[0]).toEqual([{ start: f16(30), end: f16(71) }]);
+    expect(floored.spans[1]).toEqual([{ start: f16(60), end: f16(131) }]);
+    expect(floored.speechSeconds[2]).toBeCloseTo((18 * FRAME_SHIFT) / MODEL_SAMPLE_RATE, 9);
+    // T's 13.8 % share clears the floor, so nothing here is the floor's doing
+    const total = floored.speechSeconds.reduce((a, b) => a + b, 0);
+    expect(floored.speechSeconds[2] / total).toBeGreaterThan(MIN_SPEAKER_SHARE);
+  });
+
+  it('the same evidence assembles T as a third speaker end to end', () => {
+    const ev = boundaryEvidence();
+    const d = assembleDiarization(ev, { speakerCount: 3 });
+    expect(d.speakerCount).toBe(3);
+    const t = d.segments.find((s) => s.startSample16k === f16(42));
+    expect(t).toEqual({ startSample16k: f16(42), endSample16k: f16(60), speaker: expect.any(Number) });
+    expect(d.speechSeconds[(t as DiarizationSegment).speaker]).toBeCloseTo((18 * FRAME_SHIFT) / MODEL_SAMPLE_RATE, 9);
   });
 });
 

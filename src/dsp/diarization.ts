@@ -658,11 +658,26 @@ function assembleLabels(evidence: DiarizationEvidence, labels: readonly number[]
   });
 
   const votes = new Float64Array(frameCount * clusterCount);
-  const stamp = new Int32Array(clusterCount).fill(-1);
+  /**
+   * Last global frame this window voted each cluster for, so several local
+   * slots of ONE window sharing a cluster cast ONE vote — the reference's
+   * `relabels[i, j, t] = 1` is 0/1 within chunk i and only the finished chunk
+   * is added to the running count.
+   *
+   * CLEARED PER WINDOW, and that is the whole point: the saturation is per
+   * window, never across windows. Carried over, window i+1 skips whichever
+   * frame window i stamped last — so a cluster two windows both hear at the
+   * same global frame scores 1 instead of 2, which flips the argsort below and
+   * can cost it a whole segment (a run one frame short of MIN_ON_S is dropped).
+   * Reused rather than reallocated: at the 2 h cap this loop runs over 7,000
+   * windows.
+   */
+  const stamp = new Int32Array(clusterCount);
   for (let i = 0; i < windows.length; i++) {
     const classes = windows[i];
     const start = windowStartFrame(i);
     const slots = slotCluster[i];
+    stamp.fill(-1);
     for (let f = 0; f < SEG_FRAMES; f++) {
       const g = start + f;
       if (g >= frameCount) break;
