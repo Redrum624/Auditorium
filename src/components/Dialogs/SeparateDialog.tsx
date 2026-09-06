@@ -79,34 +79,21 @@ function formatSeconds(seconds: number): string {
 }
 
 /**
- * Decimal megabytes — the unit the 166 MB figure in the plan and on the
- * Hugging Face page is quoted in — rounded to a whole one.
+ * THE megabyte formatter for every download figure on this panel: both per-set
+ * gate lines, the stems-mode sentence, and BOTH halves of the running counter.
  *
- * The RUNNING download counter, and nothing else. Every figure that names the
- * SIZE of a download goes through {@link formatModelSize} instead, because
- * whole megabytes round the speaker set to "33 MB" while the per-set line four
- * lines above it — and the plan, the README and the docs — all say 32.5: two
- * numbers on one panel for one file. A moving byte count has no such twin to
- * disagree with, and a decimal that changes ten times a second is noise.
- */
-function formatMb(bytes: number): string {
-  return `${Math.round(bytes / 1e6)} MB`;
-}
-
-/**
- * The size of ONE model set, for the gate's per-set lines.
+ * THREE significant figures, which is exactly the precision D5 quotes its two
+ * sets at: 165,612,636 B is "166 MB" and 32,523,463 B is "32.5 MB" — the same
+ * 32.5 the service's own model-missing refusal states (`diarizeService.ts`).
+ * Whole megabytes would round the speaker set to "33 MB" against the 32.5 on
+ * the line four above it, and a fixed tenth would print the Demucs set as
+ * "165.6 MB" against the 166 quoted everywhere else.
  *
- * THREE significant figures, which is exactly the precision both of D5's
- * figures are quoted at: 165,612,636 B is "166 MB" and 32,523,463 B is
- * "32.5 MB". {@link formatMb}'s whole megabytes would print the speaker set as
- * "33 MB" while the plan, the README and the docs all say 32.5 — two numbers
- * for one download — and a fixed tenth would print the Demucs set as "165.6 MB"
- * against the 166 quoted everywhere else.
- *
- * So EVERY size-of-a-download figure is this one: the two per-set gate lines,
- * the stems-mode sentence, and the total the progress line counts towards.
- * Only the RECEIVED half of that line is whole megabytes, and it is the half
- * with nothing to contradict ({@link formatMb}).
+ * One formatter for both halves of "X of Y" is not tidiness. With the counter
+ * on whole megabytes and the total on three figures, the tick every download
+ * ends on read "33 MB of 32.5 MB": a received figure LARGER than the total it
+ * was counting towards. One formatter, over a byte count the panel holds to
+ * the total, cannot print above it.
  */
 function formatModelSize(bytes: number): string {
   return `${Number((bytes / 1e6).toPrecision(3))} MB`;
@@ -301,6 +288,11 @@ export default function SeparateDialog({
   const needSpeakers = voice && speakerModel?.downloaded !== true;
   /** One bar over the SUM of the sets actually being fetched (D5). */
   const downloadTotal = (needStems ? stemExpected : 0) + (needSpeakers ? speakerExpected : 0);
+  /** What that one bar and its counter have reached. Held to the total on
+   *  purpose: a mirror that serves a few bytes past the pinned size would
+   *  otherwise print a counter above the bill it is counting towards, which is
+   *  the same nonsense two different formatters used to produce. */
+  const downloadedBytes = Math.min(downloadedBase + received, downloadTotal);
 
   async function handleDownload(): Promise<void> {
     setDownloading(true);
@@ -647,16 +639,14 @@ export default function SeparateDialog({
                   {voice
                     ? `Downloading the ${
                         downloadingSet === 'speakers' ? 'speaker models' : 'voice separation model'
-                      }… ${formatMb(downloadedBase + received)} of ${formatModelSize(
-                        downloadTotal
-                      )}`
-                    : `Downloading… ${formatMb(downloadedBase + received)} of ${formatModelSize(
+                      }… ${formatModelSize(downloadedBytes)} of ${formatModelSize(downloadTotal)}`
+                    : `Downloading… ${formatModelSize(downloadedBytes)} of ${formatModelSize(
                         downloadTotal
                       )}`}
                 </p>
                 <ProgressTrack
                   testId="separate-download-progress"
-                  fraction={downloadTotal > 0 ? (downloadedBase + received) / downloadTotal : 0}
+                  fraction={downloadTotal > 0 ? downloadedBytes / downloadTotal : 0}
                 />
               </div>
             ) : (

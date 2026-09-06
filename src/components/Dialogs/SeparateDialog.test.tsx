@@ -242,7 +242,10 @@ describe('SeparateDialog', () => {
     act(() => {
       onProgress({ received: 82_806_318, total: MODEL_BYTES });
     });
-    expect(screen.getByTestId('separate-download-status')).toHaveTextContent('83 MB of 166 MB');
+    // Both halves of "X of Y" come off ONE formatter, so the counter is quoted
+    // to the same three figures as the bill: 82,806,318 B is 82.8 MB, not the
+    // 83 whole megabytes would round it to.
+    expect(screen.getByTestId('separate-download-status')).toHaveTextContent('82.8 MB of 166 MB');
     expect(screen.getByTestId('separate-download-progress').style.width).toBe('50%');
 
     mockModelState.mockResolvedValue(PRESENT);
@@ -754,9 +757,8 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // ONE download, ONE size. VG1 pins the per-set line at 32.5 MB and the
     // progress line four lines under it has to agree: whole megabytes round
     // 32,523,463 B up to "33 MB" and put two different figures for the same
-    // file on one panel. The RECEIVED half stays whole-megabyte — a decimal
-    // that changes ten times a second is noise — so only the total is quoted
-    // the way the set itself is.
+    // file on one panel. VG2b pins the other half of that rule — the running
+    // counter is quoted the same way, so it can never overshoot its own total.
     expect(status).toHaveTextContent('of 32.5 MB');
     expect(status).not.toHaveTextContent('of 33 MB');
     expect(screen.getByTestId('separate-model-line-speakers')).toHaveTextContent('32.5 MB');
@@ -765,6 +767,52 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
       mockEnsureDiarize.mock.calls[0][0]!({ received: DIARIZE_BYTES / 2, total: DIARIZE_BYTES });
     });
     expect(width('separate-download-progress')).toBe(50);
+
+    mockDiarizeModelState.mockResolvedValue(DIARIZE_PRESENT);
+    await act(async () => {
+      pending.resolve({ ok: true });
+    });
+    expect(screen.getByRole('button', { name: 'Separate' })).toBeEnabled();
+  });
+
+  it('VG2b. the counter is quoted like the total, so the last tick cannot overshoot it', async () => {
+    seedDoc();
+    mockDiarizeModelState.mockResolvedValue(DIARIZE_MISSING);
+    const pending = deferred<{ ok: true } | { ok: false; error: string }>();
+    mockEnsureDiarize.mockReturnValue(pending.promise);
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Download Models' }));
+    });
+    const onProgress = mockEnsureDiarize.mock.calls[0][0]!;
+    const status = () => screen.getByTestId('separate-download-status');
+
+    // Mid-download, off every identity in sight: 24,178,000 B is not the
+    // total, not a whole megabyte, and not half of anything.
+    act(() => {
+      onProgress({ received: 24_178_000, total: DIARIZE_BYTES });
+    });
+    expect(status().textContent).toBe('Downloading the speaker models… 24.2 MB of 32.5 MB');
+
+    // The tick EVERY download ends on — diarizeManager sends the
+    // received === total event unthrottled. A counter on whole megabytes
+    // rounded 32,523,463 B up to 33 and printed "33 MB of 32.5 MB": a received
+    // figure larger than the total it was counting towards.
+    act(() => {
+      onProgress({ received: DIARIZE_BYTES, total: DIARIZE_BYTES });
+    });
+    expect(status().textContent).toBe('Downloading the speaker models… 32.5 MB of 32.5 MB');
+    expect(status()).not.toHaveTextContent('33 MB');
+    expect(width('separate-download-progress')).toBe(100);
+
+    // ...and a mirror that serves a few hundred kilobytes past the pinned size
+    // still cannot bill more than the bill: 32.9 MB would print if the counter
+    // were not held to the total.
+    act(() => {
+      onProgress({ received: DIARIZE_BYTES + 400_000, total: DIARIZE_BYTES });
+    });
+    expect(status().textContent).toBe('Downloading the speaker models… 32.5 MB of 32.5 MB');
 
     mockDiarizeModelState.mockResolvedValue(DIARIZE_PRESENT);
     await act(async () => {
