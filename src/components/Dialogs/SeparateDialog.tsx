@@ -23,6 +23,7 @@ import {
 } from '../../services/stemLanding';
 import {
   DIARIZE_MODEL_BYTES,
+  MEASURED_EMBED_MS_PER_S,
   MEASURED_SEGMENT_MS_PER_S,
   cancelDiarization,
   diarizeChannels,
@@ -328,12 +329,21 @@ export default function SeparateDialog({
       }
     } finally {
       if (!unmountedRef.current) setDownloading(false);
+      // Re-probed on EVERY exit path, not only the all-green one: with two
+      // sequential ensures (D5) the interesting exit is the half-finished one.
+      // When Demucs lands and the speaker set then fails, a probe skipped by an
+      // early return leaves the gate reading "needed" for a set that is now on
+      // disk — and since `downloadTotal` is built from those same flags, the
+      // retry would re-price the 166 MB set and re-run its ensure over it.
+      if (!unmountedRef.current) {
+        const nextStem = await getStemModelState();
+        if (!unmountedRef.current) setStemModel(nextStem);
+      }
+      if (voice && !unmountedRef.current) {
+        const nextSpeaker = await getDiarizeModelState();
+        if (!unmountedRef.current) setSpeakerModel(nextSpeaker);
+      }
     }
-    const nextStem = await getStemModelState();
-    if (!unmountedRef.current) setStemModel(nextStem);
-    if (!voice) return;
-    const nextSpeaker = await getDiarizeModelState();
-    if (!unmountedRef.current) setSpeakerModel(nextSpeaker);
   }
 
   async function handleSeparate(): Promise<void> {
@@ -498,12 +508,21 @@ export default function SeparateDialog({
   const canSeparate = !busy && notes === null && review === null && doc !== null && length > 0 && modelsReady;
   const message = error ?? (doc === null ? 'No document is open.' : null);
 
-  // D5: the pre-run estimate sums stage 1 and stage 2; stage 3 is named rather
-  // than numbered, because it is the one whose measured spread is widest
-  // (29-73 ms per audio second across the four recordings).
+  // D5: the pre-run estimate sums stage 1 (Demucs, 1/1.52 x realtime) and the
+  // WHOLE of stage 2 — which D1 defines as segmentation AND embedding, so both
+  // measured seeds belong in it. The embedding seed is 55 ms per audio second
+  // against segmentation's 8 (`diarizeService`), so an estimate carrying only
+  // the segmentation half would drop seven eighths of the stage and understate
+  // a 15-minute source by ~50 s against the 7 s it did include. Stage 3 —
+  // clustering and assembly, in this renderer — is named rather than numbered
+  // because it has no measured seed at all; the widest measured spread in the
+  // sum is the EMBEDDING's own (29-73 ms per audio second across the four
+  // spike recordings), which is why the sentence promises "a short pass"
+  // rather than a second number.
   const audioSeconds = doc ? length / doc.sampleRate : 0;
   const estimateSeconds =
-    audioSeconds / MEASURED_REALTIME_FACTOR + (voice ? (audioSeconds * MEASURED_SEGMENT_MS_PER_S) / 1000 : 0);
+    audioSeconds / MEASURED_REALTIME_FACTOR +
+    (voice ? (audioSeconds * (MEASURED_SEGMENT_MS_PER_S + MEASURED_EMBED_MS_PER_S)) / 1000 : 0);
   const remaining = progress?.estimatedRemainingMs ?? null;
 
   const speakerCount = review?.diarization.speakerCount ?? 0;

@@ -782,6 +782,39 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(screen.getByRole('button', { name: 'Separate' })).toBeEnabled();
   });
 
+  it('VG4. a set that DID land is re-probed even when the next one fails', async () => {
+    seedDoc();
+    mockModelState.mockResolvedValue(MISSING);
+    mockDiarizeModelState.mockResolvedValue(DIARIZE_MISSING);
+    mockEnsureDiarize.mockResolvedValue({ ok: false, error: 'Download failed: ECONNRESET' });
+    await renderVoice();
+
+    // Demucs lands; the speaker set does not.
+    mockModelState.mockResolvedValue(PRESENT);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Download Models' }));
+    });
+
+    expect(screen.getByTestId('separate-error')).toHaveTextContent('Download failed: ECONNRESET');
+    // The 166 MB set is on disk now and the gate has to say so: a line still
+    // reading "needed" asks the user to pay a bill they already paid.
+    expect(screen.getByTestId('separate-model-line-stems')).toHaveTextContent('already here');
+    expect(mockModelState).toHaveBeenCalledTimes(2);
+
+    // ...and the retry runs only the ensure that is still missing, over a bar
+    // that spans the 32.5 MB set alone, not the 198 MB both would have cost.
+    const pending = deferred<{ ok: true } | { ok: false; error: string }>();
+    mockEnsureDiarize.mockReturnValue(pending.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Download Models' }));
+    });
+    expect(mockEnsureModel).toHaveBeenCalledTimes(1);
+    expect(mockEnsureDiarize).toHaveBeenCalledTimes(2);
+    const status = screen.getByTestId('separate-download-status');
+    expect(status).toHaveTextContent('of 33 MB');
+    expect(status).not.toHaveTextContent('of 198 MB');
+  });
+
   // ------------------------------------------------------------- the pre-run
 
   it('VP1. states what a speaker split produces — one track per speaker, never "two tracks"', async () => {
@@ -809,13 +842,29 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(text).toMatch(/do not add back sample for sample/);
   });
 
-  it('VP3. the estimate sums the separation and the segmentation, and says a pass follows', async () => {
-    seedDoc('song.wav', 16 * SR);
+  it('VP3. the estimate sums stage 1 and the WHOLE of stage 2 — segmentation AND embedding', async () => {
+    // 900 audio seconds, not the 16 s a small fixture would use: at 16 s
+    // Demucs alone (10.53 s), Demucs + segmentation (10.66 s) and D1's whole
+    // stage 1 + 2 (11.54 s) all round to the same 0:11, so the pin would be
+    // measuring the identity. At 900 s they separate: 9:52 / 9:59 / 10:49.
+    // A mono 8 kHz document because only length / sampleRate reaches the
+    // estimate, and 900 s of 44.1 kHz stereo is 317 MB of fixture.
+    const doc = createDocument({
+      name: 'long.wav',
+      sampleRate: 8_000,
+      channels: [new Float32Array(900 * 8_000)],
+    });
+    useAppStore.getState().addDocument(doc);
     await renderVoice();
 
-    // 16 s / 1.52 = 10.53 s of Demucs + 16 x 8 ms of segmentation = 10.66 s.
+    // 900 / 1.52 = 592.11 s of Demucs + 900 x (8 + 55) ms = 56.7 s of
+    // segmentation + embedding = 648.81 s. The embedding half is 6.9x the
+    // segmentation half, so dropping it is the bigger of the two errors.
     const estimate = screen.getByTestId('separate-estimate');
-    expect(estimate).toHaveTextContent('0:11');
+    expect(estimate).toHaveTextContent('10:49');
+    // Demucs alone, and Demucs + segmentation only: both understate the wait.
+    expect(estimate).not.toHaveTextContent('9:52');
+    expect(estimate).not.toHaveTextContent('9:59');
     expect(estimate).toHaveTextContent('plus a short pass to tell the voices apart');
   });
 
@@ -895,6 +944,57 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
       diarPending.resolve({ ok: true, evidence: makeEvidence(), diarization: makeDiarization() });
     });
     expect(screen.getByTestId('speaker-review')).toBeInTheDocument();
+  });
+
+  it('VR1b. the weighted bar never falls: a late stem event during stage 2 cannot walk it back', async () => {
+    seedDoc();
+    const stemPending = deferred<StemSeparationResult>();
+    mockSeparate.mockReturnValue(stemPending.promise);
+    const diarPending = deferred<DiarizeResult>();
+    mockDiarize.mockReturnValue(diarPending.promise);
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+    const onStemProgress = mockSeparate.mock.calls[0][0].onProgress!;
+
+    act(() => {
+      onStemProgress(progressAt({ segment: 12, fraction: 1, estimatedRemainingMs: 0 }));
+    });
+    const atStemEnd = width('separate-progress');
+    expect(atStemEnd).toBe(Math.round(STAGE_WEIGHTS.separate * 100));
+
+    await act(async () => {
+      stemPending.resolve({ ok: true, output: makeVoiceOutput() });
+    });
+    const onDiarizeProgress = mockDiarize.mock.calls[0][0].onProgress!;
+
+    // Stage 2's first event carries fraction 0. The bar is a WHOLE-RUN bar, so
+    // it stays at stage 1's weight instead of restarting from nothing.
+    act(() => {
+      onDiarizeProgress({
+        phase: 'segmenting',
+        done: 0,
+        total: 57,
+        fraction: 0,
+        elapsedMs: 0,
+        estimatedRemainingMs: 1_200,
+      });
+    });
+    expect(width('separate-progress')).toBe(atStemEnd);
+
+    // The stem host's onProgress closure is still callable after its promise
+    // settled, and D5's clamp is what that costs: one straggling event at a
+    // quarter computes ~23 % of the bar and, unclamped, walks it back from
+    // 91 % in front of the user.
+    act(() => {
+      onStemProgress(progressAt());
+    });
+    expect(width('separate-progress')).toBe(atStemEnd);
+    expect(screen.getByTestId('separate-progress-label')).toHaveTextContent(
+      'Listening for speakers — window 0 of 57'
+    );
   });
 
   it('VR2. hands the VOCALS stem to the diarizer at the output rate, and nothing else', async () => {
@@ -1189,7 +1289,35 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(note).toHaveTextContent('7');
     expect(note).toHaveTextContent(/Backing/);
     expect(note).not.toHaveTextContent(/Residual track/);
+    // D4 forbids an exactness claim for a SPLIT: two speaker tracks carry edge
+    // fades and share their overlap regions, so they do not add back up.
+    expect(note).not.toHaveTextContent('add back up');
     expect(mockLandSpeakers).not.toHaveBeenCalled();
+  });
+
+  it('VR16b. one voice keeps the two-track sum claim the split may not make (D4)', async () => {
+    seedDoc();
+    mockSeparate.mockResolvedValue({
+      ok: true,
+      output: makeVoiceOutput({ sanitisedEstimateSamples: 7 }),
+    });
+    mockDiarize.mockResolvedValue({
+      ok: true,
+      evidence: makeEvidence(),
+      diarization: makeDiarization({ speakerCount: 1, rawClusterCount: 1, speechSeconds: [9] }),
+    });
+    await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    // A confirmed count of one IS Voice + Backing, and that pair does add back
+    // up — the sentence D4 forbids for a split is the true one here. Pinned
+    // one step below the >= 2 boundary the note branches on, so moving that
+    // boundary fails either this test or VR16.
+    const note = screen.getByTestId('separate-note-sanitised');
+    expect(note).toHaveTextContent('7');
+    expect(note).toHaveTextContent('The two tracks still add back up');
   });
 
   // ------------------------------------------------------- refusals + cancel
@@ -1212,6 +1340,54 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockLandSpeakers).not.toHaveBeenCalled();
     expect(mockLandVoice).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('VS1. a stem-stage refusal in voice mode ends the run instead of hanging it', async () => {
+    seedDoc();
+    const message = 'Stem separation is limited to 15 minutes of audio.';
+    mockSeparate.mockResolvedValue({ ok: false, status: 'too-long', message });
+    const { onClose } = await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    // In voice mode the stem stage's `finally` deliberately does NOT clear the
+    // stage — stage 2 starts behind it without flashing the idle state — so
+    // the refusal path has to clear it itself. Without that the dialog is
+    // UNCLOSABLE: the bar and Cancel stay up on a run that is over, and
+    // `dismissable={!busy}` kills Escape while no Close button is rendered.
+    expect(screen.getByTestId('separate-error')).toHaveTextContent(message);
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Separate' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('separate-progress')).not.toBeInTheDocument();
+    expect(mockDiarize).not.toHaveBeenCalled();
+    expect(mockLandSpeakers).not.toHaveBeenCalled();
+    expect(mockLandVoice).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('VS2. a stem "model-missing" in voice mode puts the two-set gate back', async () => {
+    seedDoc();
+    mockSeparate.mockResolvedValue({
+      ok: false,
+      status: 'model-missing',
+      message: 'The separation model has not been downloaded yet (166 MB, one time).',
+    });
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    expect(screen.getByTestId('separate-model-missing')).toBeInTheDocument();
+    expect(screen.getByTestId('separate-model-line-stems')).toHaveTextContent('needed');
+    expect(screen.getByRole('button', { name: 'Download Models' })).toBeEnabled();
+    // The run is over: a gate behind a live Cancel button cannot be used.
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('separate-progress')).not.toBeInTheDocument();
+    expect(mockDiarize).not.toHaveBeenCalled();
   });
 
   it('VC2. Cancel during the separation spawns NO diarizer', async () => {
