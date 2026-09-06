@@ -1629,12 +1629,26 @@ material was concatenated single-speaker recordings, so it had clean cuts, no
 crosstalk, no overlapping speech, and different channel conditions per
 speaker, all of which make the job easier than a real conversation.
 
+**This is the TRANSCRIBE panel's speaker labelling, and it is no longer the
+only speaker path in the app.** `Pipeline → Separate Voice` runs a different
+one — pyannote-segmentation-3.0 over 10 s windows plus WeSpeaker ResNet34-LM
+embeddings, measured in `docs/bench/diarize-bench-baseline.json` and described
+in its own entry below. The two do not share an embedder, a clustering policy
+or a measurement, and the Transcript panel still uses the one measured here.
+**Follow-up, recorded not done:** re-measure the Transcript panel's labels with
+WeSpeaker + per-utterance mean subtraction, which is what the 2026-09-05 sweep
+found made the difference (CAM++ scored 33-62 % audio-anchored consistency on
+the same material where WeSpeaker + CMN scored 96-100 %).
+
 **Why it is built this way:** the failure is in the count selection *and* in
 the clustering, so neither half can be patched alone — forcing k = 3 still
 only reached 73 %, which means CAM++ embeddings over 2 s chunks are simply not
-cleanly separable for that trio. Frame-level diarization with overlap
-detection is a different model class (pyannote's segmentation models), and
-those are HuggingFace-gated, which the on-demand-download design rules out.
+cleanly separable for that trio. Frame-level diarization with overlap detection
+is a different model class (pyannote's segmentation models); the upstream
+HuggingFace repository is gated, which is what ruled it out here, and what
+changed is that a k2-fsa ONNX conversion of the same MIT model is published
+ungated — so Separate Voice downloads it on demand like every other model, and
+this panel could be moved onto the same evidence.
 The obvious cheap fix was measured and rejected: thresholding the silhouette
 score cannot separate "one speaker" from "two" here — single-speaker sets
 scored up to 0.379 and the weakest genuine two-speaker set also scored 0.379,
@@ -2321,6 +2335,12 @@ in this version.
 **Area:** Separate Voice (`voice.separate`, `src/services/stemLanding.ts`
 `landVoice`, `src/services/stemPartition.ts`)
 
+**Scope:** this entry is about the **two-track** landing — one voice and one
+Backing, which is what Separate Voice lands when it finds a single speaker (or
+when you set the count to 1). A landing of **several speakers** carries no
+reconstruction claim at all and is covered by its own entry below; the number
+here is not a tolerance for that path.
+
 **Current behavior:** the two-track landing sums the Drums, Bass, Other and
 Residual stems into one **Backing** document and keeps Vocals as **Voice**.
 The five-stem partition has an exact-sum property — the residual is the
@@ -2353,6 +2373,90 @@ separate tracks would keep the exact sum and lose the point of the tool;
 rounding at the seventh decimal is the honest price of two tracks, and it is
 stated rather than hidden. The shared message text is worth a mode-aware
 sentence and has not had one yet.
+
+## A speaker split is a COUNT that was right four times out of four, and nothing finer
+
+**Area:** Separate Voice with more than one voice (`voice.separate`,
+`electron/diarizeHost.cjs`, `electron/diarizeManager.cjs`,
+`src/dsp/diarization.ts`, `src/services/diarizeService.ts`,
+`src/services/stemLanding.ts` `landSpeakers`,
+`src/components/Dialogs/SeparateDialog.tsx`)
+
+**Behavior a user will notice:** the tool separates the voice, counts the
+speakers in it, and shows the count with each speaker's speech time *before*
+anything lands. Accept it and you get one full-length track per speaker plus
+Backing; change it and the grouping is recomputed instantly from the
+measurements already taken. It never tells you it is unsure, so the count is a
+control, not a readout.
+
+**The measurement** — `docs/bench/diarize-bench-baseline.json`, written by
+`scripts/diarize-bench.cjs` on the four sherpa-onnx test recordings (~162 s in
+total), in the two conditions that matter:
+
+| Mode | Counts vs the file-name truth | Audio-anchored consistency |
+|---|---|---|
+| `--direct` (16 kHz speech straight into the speaker step) | 2 / 2 / 2 / 4 vs 2 / 2 / 2 / 4 — **4 of 4** | 100 / 100 / 96.5 / 100 % |
+| `--full-chain` (what the tool does: HT-Demucs first, then the Vocals stem) | 2 / 2 / 2 / 4 vs 2 / 2 / 2 / 4 — **4 of 4** | 100 / 91.9 / 96.8 / 100 % |
+
+Speaker shares agree between the two modes to within a percentage point
+(45.7/54.3, 59.3/40.7 → 54.3/45.8, 43.0/57.0, and 37.0/19.3/18.7/25.0 on the
+four-speaker file). Three consecutive runs on an idle machine produced the same
+counts and shares.
+
+**What that table does NOT establish, stated plainly:** the material ships a
+speaker *count* per file and no reference segmentation, so there is **no
+diarization error rate** — a row can have the right count with the wrong turns,
+and nothing here measures who spoke when. Four recordings is four. One of them
+is the only four-speaker case, and it is Mandarin read by an **English-trained**
+embedder (WeSpeaker VoxCeleb ResNet34-LM). Overlapping speech is near-absent in
+all four, so overlap handling is untested end to end. Recordings with many short
+turns or heavy crosstalk were not in the set. The clustering threshold (0.55)
+sits at the centre of a 0.50-0.60 plateau over which all four counts stay
+right — but that plateau was mapped on those same four recordings, so it is
+evidence of stability, not of generality.
+
+**Overlapping speech lands in BOTH tracks, and the tracks do not add back up.**
+Where two clusters are active at once, that audio is written into both speakers'
+documents; and every kept turn is faded in and out over 10 ms so its edges do
+not click. So `speakers + Backing ≠ source`, and unlike **Separate into Stems**
+(bit-exact) and the one-voice landing (within float32 rounding, 4.32e-7) this
+landing carries **no reconstruction claim in either direction** — the dialog
+says so before you land and prints no exactness note afterwards. The Backing on
+its own is unchanged and still adds back to the source.
+
+**A speaker landing is N + 1 full-length documents, and none of them has been
+saved.** Every speaker track is the whole voice stem with the other speakers
+zeroed, and the Backing is full length too, so a 15-minute 44.1 kHz stereo
+source costs 317.5 MB per document: 952.6 MB at two speakers, 1.3 GB at three.
+Measured, allocating those buffers at N = 4 (five documents, 1,587.6 MB
+predicted) moved process RSS by **1,590.8 MB**, and 1,946.4 MB with the source
+stem still held — arithmetic that lands within 0.2 % of what the panel quotes.
+The dialog refuses a landing above **1.2 GB** with the figure in hand, which at
+15 minutes means three speakers or more; shorter sources reach higher counts.
+Because these documents have never been written to disk, **saving the project
+writes every one of them into the project file** — export the speakers you want
+and close the rest instead.
+
+**The time estimate assumes an otherwise idle machine, and runs short when the
+machine is busy.** Measured on this machine with nothing else running, the whole
+chain costs 583-655 ms of wall clock per audio second (the stem stage 1.9-2.1×
+realtime, segmentation 6.0-11.9 ms and embedding 39.9-110.1 ms per audio
+second), so a 15-minute recording takes about nine and a half minutes against
+the ~11 minutes the panel predicts — it reads long, which is the safe
+direction. Run the same bench with a full test suite running beside it and the
+stem stage halves to ~0.95× realtime and the chain costs 1,150-1,230 ms per
+audio second: the same 15 minutes then takes about 18, and **the estimate is
+short by roughly 40 %**. The estimate's Demucs term (`MEASURED_REALTIME_FACTOR`
+= 1.52, unchanged) is the conservative end of the app's own two stem
+measurements; re-deriving it needs a stem bench of its own, which has not been
+run.
+
+**Intended behavior:** the count, the plateau and the confirmation step are
+settled. What is missing is *evidence*, not code: ground-truth RTTM material
+(VoxConverse dev, CC-BY) would turn this entry's count table into a diarization
+error rate and let overlap be measured rather than described. The Transcript
+panel's own speaker labels still run on the older CAM++ path — see the entry
+above and its follow-up.
 
 ## The Podcast Chain's limiter is sample peak, and its gate has no manual threshold
 
