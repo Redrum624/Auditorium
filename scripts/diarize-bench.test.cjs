@@ -615,6 +615,53 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
     expect(out.tables.fullChain.rows).toEqual(previous.tables.fullChain.rows);
   });
 
+  /**
+   * The SECOND carry. A table carried once already names the run that measured
+   * it; carrying it again must not re-date it to the file it was merely carried
+   * THROUGH — that file's run measured nothing of this mode, and the header
+   * (:38-40) says a carried table keeps "a `carriedFrom` stamp naming the run
+   * that produced them". Two `--direct`-only runs in a row is all it takes, and
+   * `main` prints `carriedFrom` beside the table's own machine, so a drifting
+   * stamp makes the two halves of one log line disagree.
+   */
+  it('does not re-date or re-sign a table that was already carried once', () => {
+    const other = { ...MACHINE_FIXTURE, cpu: 'Xeon Gold 6248 (CI runner)', cpus: 40, memGb: 192 };
+    const original = bench.buildBaseline({
+      generated: '2026-09-05T20:00:00.000Z',
+      machine: other,
+      models: MODELS_FIXTURE,
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: {
+        ran: true,
+        rows: [okRow({ file: '3-two-speakers-en.wav', audioSeconds: 54.8, speakerCount: 2 })],
+      },
+    });
+    const carriedOnce = rerun({
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+      previous: original,
+    });
+    expect(carriedOnce.tables.fullChain.carriedFrom).toBe('2026-09-05T20:00:00.000Z');
+
+    const carriedTwice = bench.buildBaseline({
+      generated: '2026-09-07T11:30:00.000Z',
+      machine: MACHINE_FIXTURE,
+      models: MODELS_FIXTURE,
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+      previous: carriedOnce,
+    });
+    // Byte-identical rows, so the stamp beside them must still be the run that
+    // measured them — neither the middle file (09-06) nor this one (09-07).
+    expect(carriedTwice.tables.fullChain.rows).toEqual(original.tables.fullChain.rows);
+    expect(carriedTwice.tables.fullChain.carriedFrom).toBe('2026-09-05T20:00:00.000Z');
+    expect(carriedTwice.tables.fullChain.machine).toEqual(other);
+    // The reason is THIS run's — why it published no full chain of its own.
+    expect(carriedTwice.tables.fullChain.carriedReason).toBe('not requested (run with --full-chain)');
+    expect(carriedTwice.generated).toBe('2026-09-07T11:30:00.000Z');
+    expect(carriedTwice.tables.direct.carriedFrom).toBeUndefined();
+  });
+
   it('falls back to the previous FILE machine for a table written before the stamp existed', () => {
     // A baseline from before the per-table stamp has no machine on its tables,
     // and the only attribution it carries for them is the file's own machine

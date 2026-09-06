@@ -302,7 +302,12 @@ function publishedTable(mode, produced, previousTable, previousGenerated, machin
     // attribution it carries for them is the machine block of the file they
     // came from — which is where those timings were produced.
     machine: previousTable.machine ?? previousMachine ?? null,
-    carriedFrom: previousGenerated ?? null,
+    // Same rule for the DATE beside it: a table carried a second time keeps the
+    // stamp of the run that MEASURED it, not of the file it was carried
+    // through — two `--direct`-only runs in a row would otherwise date these
+    // rows to a run that measured no full chain at all, and the log line below
+    // prints this stamp next to the machine above it.
+    carriedFrom: previousTable.carriedFrom ?? previousGenerated ?? null,
     carriedReason:
       fresh.notRunReason ?? `this run measured nothing — ${fresh.skipped} recording(s) skipped`,
   };
