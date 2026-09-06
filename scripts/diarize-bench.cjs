@@ -33,7 +33,13 @@
  *
  * Output: this table on stdout plus `docs/bench/diarize-bench-baseline.json`
  * (both tables, the model pins that produced them, and the machine — timings
- * are meaningless without it). `SPEAKER_SEPARATION_LIMITS` and
+ * are meaningless without it). A run publishes only the tables it MEASURED:
+ * the mode it did not run keeps whatever the file already held, stamped with
+ * the run that produced it (`carriedFrom`), because `--out` defaults to that
+ * committed file and a one-mode run must not blank the other half of the
+ * verdict. And a run that measured nothing — no recording on this machine, or
+ * `--full-chain` alone with the 165 MB model absent — exits 1 rather than
+ * reporting an empty table as a success. `SPEAKER_SEPARATION_LIMITS` and
  * `KNOWN_LIMITATIONS.md` cite that file, so what it does NOT establish is
  * written into it: four recordings, ~162 s in total, count-only truth (no
  * RTTM, no DER), one four-speaker file and it is Mandarin under an
@@ -263,12 +269,39 @@ function tableOf(mode, table) {
 }
 
 /**
+ * The table to publish for one mode: this run's when it measured something,
+ * otherwise the one the file being written already holds.
+ *
+ * WHY: `--out` defaults to the COMMITTED `docs/bench/diarize-bench-baseline.json`,
+ * the verdict `SPEAKER_SEPARATION_LIMITS` and `KNOWN_LIMITATIONS.md` cite. A
+ * run of one mode (or one whose recordings are not on this machine) used to
+ * write an EMPTY table over the other one and exit 0 — a measurement destroyed
+ * by a run that measured nothing. A run now publishes only what it measured,
+ * and a carried table says whose numbers it is and why this run did not
+ * produce its own, so it can never read as fresh.
+ */
+function publishedTable(mode, produced, previousTable, previousGenerated) {
+  const fresh = tableOf(mode, produced || {});
+  if (fresh.measured > 0) return fresh;
+  if (!previousTable || previousTable.ran !== true || !(previousTable.measured > 0)) return fresh;
+  return {
+    ...previousTable,
+    carriedFrom: previousGenerated ?? null,
+    carriedReason:
+      fresh.notRunReason ?? `this run measured nothing — ${fresh.skipped} recording(s) skipped`,
+  };
+}
+
+/**
  * The committed verdict. Everything a reader needs to judge the numbers
  * WITHOUT re-running: the policy constants they were produced under, the model
  * files that produced them, the machine that timed them, and what the truth is
- * (and is not).
+ * (and is not). `previous` is the baseline this one replaces, when there is
+ * one — see `publishedTable`.
  */
-function buildBaseline({ generated, machine, models, direct, fullChain, policy = POLICY }) {
+function buildBaseline({ generated, machine, models, direct, fullChain, previous = null, policy = POLICY }) {
+  const previousTables = (previous && typeof previous === 'object' && previous.tables) || null;
+  const previousGenerated = previous && typeof previous === 'object' ? previous.generated : null;
   return {
     script: 'scripts/diarize-bench.cjs',
     generated,
@@ -281,10 +314,51 @@ function buildBaseline({ generated, machine, models, direct, fullChain, policy =
     models,
     machine,
     tables: {
-      direct: tableOf('--direct', direct || {}),
-      fullChain: tableOf('--full-chain', fullChain || {}),
+      direct: publishedTable('--direct', direct, previousTables && previousTables.direct, previousGenerated),
+      fullChain: publishedTable(
+        '--full-chain',
+        fullChain,
+        previousTables && previousTables.fullChain,
+        previousGenerated
+      ),
     },
   };
+}
+
+/**
+ * Why a run that found no disagreement still must not exit 0. A bench whose
+ * tables are empty has confirmed nothing, and the exit code is the only part
+ * of a bench a gate reads: `--direct` over a machine with no recordings, and
+ * `--full-chain` alone with the 165 MB model absent, both used to print a
+ * summary saying nothing was measured and then exit 0.
+ */
+function unmeasuredFailures(ranModes, tables) {
+  const problems = [];
+  for (const mode of ranModes) {
+    const table = tables[mode === '--direct' ? 'direct' : 'fullChain'] || {};
+    const measured = (table.rows || []).filter((r) => r.status === 'ok').length;
+    if (measured === 0) problems.push(`${mode} ran but measured nothing — no recording present`);
+  }
+  if (ranModes.length === 0) problems.push('no mode ran — nothing was measured');
+  return problems;
+}
+
+/**
+ * The baseline this run is about to write over, so `publishedTable` can keep a
+ * table this run did not produce. A file that will not parse is NOT a reason
+ * to blank the tables it holds: the run refuses rather than overwrite
+ * something it cannot read.
+ */
+function readPreviousBaseline(outPath) {
+  if (!fs.existsSync(outPath)) return null;
+  const text = fs.readFileSync(outPath, 'utf8');
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      `diarize-bench: ${outPath} exists but is not readable JSON (${err.message}) — refusing to overwrite it`
+    );
+  }
 }
 
 /** Filled in from the shipped DSP the first time the bench loads it; the
@@ -440,8 +514,18 @@ async function diarize(samples16k, modelPaths) {
   }
 }
 
-/** The Vocals stem of a 44.1 kHz stereo buffer, through the REAL stem host
- * (`scripts/stem-bench-driver.cjs`'s shape, in-process). */
+/**
+ * The Vocals stem of a 44.1 kHz stereo buffer, through the REAL stem host
+ * (`scripts/stem-bench-driver.cjs`'s shape, in-process).
+ *
+ * Session creation is timed SEPARATELY (`stemInitMs`), exactly as the diarize
+ * host's is, and for the same reason: loading the 165 MB HT-Demucs model is a
+ * fixed per-run cost, so folding it into the separation stage turns
+ * `msPerAudioSecond.stem` into something that falls with file length instead
+ * of a rate. That column is read as a rate — it is what `MEASURED_REALTIME_FACTOR`
+ * (1.52, i.e. 658 ms per audio second) is compared against — and
+ * `stem-bench-driver.cjs`, which produced that constant, times the `run` only.
+ */
 async function separateVocals(channels44k, stemModelPath) {
   const { createStemHost } = require(path.join(ROOT, 'electron', 'stemHost.cjs'));
   const { MODEL_SAMPLE_RATE, STEM_NAMES, MODEL_CHANNELS } = require(
@@ -456,9 +540,11 @@ async function separateVocals(channels44k, stemModelPath) {
     if (err) throw new Error(`${err.stage}: ${err.message}`);
   };
   try {
-    const t0 = performance.now();
+    const tInit = performance.now();
     await host.handleMessage({ type: 'init', modelPath: stemModelPath });
     fail();
+    const stemInitMs = performance.now() - tInit;
+    const t0 = performance.now();
     await host.handleMessage({
       type: 'separate',
       id: 1,
@@ -484,7 +570,7 @@ async function separateVocals(channels44k, stemModelPath) {
       covered = chunk.offset + chunk.samples;
     }
     if (covered !== total) throw new Error(`stems covered ${covered} of ${total} samples`);
-    return { vocals, stemMs };
+    return { vocals, stemMs, stemInitMs };
   } finally {
     // The 165 MB session goes back to the OS before the next recording loads
     // its own, on the error path too.
@@ -506,6 +592,7 @@ async function measure({ mode, file, filename, truth, modelPaths, stemModelPath 
   let mono16k;
   let resampleMs = null;
   let stemMs = null;
+  let stemInitMs = null;
   if (mode === '--direct') {
     const tR = performance.now();
     const mono = monoMix(wav.channels, wav.channels[0].length);
@@ -525,6 +612,7 @@ async function measure({ mode, file, filename, truth, modelPaths, stemModelPath 
     resampleMs = performance.now() - tR;
     const separated = await separateVocals(stereo, stemModelPath);
     stemMs = separated.stemMs;
+    stemInitMs = separated.stemInitMs;
     const tR2 = performance.now();
     const vocalsMono = monoMix(separated.vocals, separated.vocals[0].length);
     mono16k = resample.resampleChannel(vocalsMono, 44100, MODEL_SAMPLE_RATE_16K);
@@ -556,15 +644,21 @@ async function measure({ mode, file, filename, truth, modelPaths, stemModelPath 
 
   const audioSeconds = mono16k.length / MODEL_SAMPLE_RATE_16K;
   const totalSpeech = result.speechSeconds.reduce((a, b) => a + b, 0);
+  // `init` and `stemInit` are the two session creations — reported, and kept
+  // out of the stages so `msPerAudioSecond` holds rates and not rates plus a
+  // fixed cost. Both are in `total`, which is what a run actually costs.
   const ms = {
     decode: round1(decodeMs),
     init: round1(run.initMs),
+    stemInit: stemInitMs === null ? null : round1(stemInitMs),
     stem: stemMs === null ? null : round1(stemMs),
     resample: round1(resampleMs),
     segment: round1(run.segmentMs),
     embed: round1(run.embedMs),
     assemble: round1(assembleMs),
-    total: round1((stemMs || 0) + resampleMs + run.initMs + run.segmentMs + run.embedMs + assembleMs),
+    total: round1(
+      (stemInitMs || 0) + (stemMs || 0) + resampleMs + run.initMs + run.segmentMs + run.embedMs + assembleMs
+    ),
   };
   const per = (v) => (v === null ? null : round1(v / audioSeconds));
   return {
@@ -612,32 +706,50 @@ function arg(name) {
   return hit.includes('=') ? hit.slice(name.length + 3) : true;
 }
 
-const KNOWN_FLAGS = new Set(['--direct', '--full-chain', '--assets', '--out']);
 /** Options that MUST carry a value. `--out` with none would silently overwrite
  * the COMMITTED baseline, and `--assets` with none would measure the real
  * assets while the caller believed it was pointed elsewhere. */
 const VALUE_FLAGS = new Set(['--assets', '--out']);
+/** Options that must NOT carry one. `--full-chain=1` parses to the STRING '1',
+ * which `arg('full-chain') === true` reads as false — so the run measured
+ * `--direct` (the default mode) under the name of the chain the caller asked
+ * for, and wrote that down as the full-chain verdict. */
+const BOOLEAN_FLAGS = new Set(['--direct', '--full-chain']);
+const KNOWN_FLAGS = new Set([...BOOLEAN_FLAGS, ...VALUE_FLAGS]);
+
+const USAGE =
+  'usage: node scripts/diarize-bench.cjs [--direct] [--full-chain] [--assets=<dir>] [--out=<path>]\n';
+
+/** What is wrong with this argv, or `null` when nothing is. */
+function flagProblem(argv) {
+  for (const a of argv) {
+    const name = a.split('=')[0];
+    if (!KNOWN_FLAGS.has(name)) return `diarize-bench: unknown option ${name}\n${USAGE}`;
+    if (VALUE_FLAGS.has(name) && !a.includes('=')) {
+      return `diarize-bench: ${name} needs a value, as ${name}=<path>\n`;
+    }
+    if (BOOLEAN_FLAGS.has(name) && a.includes('=')) {
+      return `diarize-bench: ${name} takes no value — write it as ${name}\n`;
+    }
+  }
+  return null;
+}
 
 async function main() {
   const log = (line) => process.stdout.write(`${line}\n`);
-  for (const a of process.argv.slice(2)) {
-    const name = a.split('=')[0];
-    if (!KNOWN_FLAGS.has(name)) {
-      process.stderr.write(
-        `diarize-bench: unknown option ${name}\n` +
-          'usage: node scripts/diarize-bench.cjs [--direct] [--full-chain] [--assets=<dir>] [--out=<path>]\n'
-      );
-      return 2;
-    }
-    if (VALUE_FLAGS.has(name) && !a.includes('=')) {
-      process.stderr.write(`diarize-bench: ${name} needs a value, as ${name}=<path>\n`);
-      return 2;
-    }
+  const problem = flagProblem(process.argv.slice(2));
+  if (problem) {
+    process.stderr.write(problem);
+    return 2;
   }
   const assetsArg = arg('assets');
   const assetsDir = typeof assetsArg === 'string' ? path.resolve(assetsArg) : DEFAULT_ASSETS;
   const outArg = arg('out');
   const outPath = typeof outArg === 'string' ? path.resolve(outArg) : DEFAULT_OUT;
+  // Read the verdict this run will merge into BEFORE measuring: a file that
+  // will not parse must stop the run at second one, not after four minutes of
+  // separation.
+  const previousBaseline = readPreviousBaseline(outPath);
   const wantFullChain = arg('full-chain') === true;
   // Default to the mode that carries the truth check: a bare invocation must
   // never be the one that measures nothing.
@@ -711,22 +823,30 @@ async function main() {
     models: DIARIZE_FILES.map((f) => ({ key: f.key, filename: f.filename, bytes: f.bytes, sha256: f.sha256 })),
     direct: tables.direct,
     fullChain: tables.fullChain,
+    previous: previousBaseline,
   });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(baseline, null, 2)}\n`);
   log('');
   log(`wrote ${path.relative(ROOT, outPath) || outPath}`);
+  for (const key of ['direct', 'fullChain']) {
+    const carried = baseline.tables[key].carriedFrom;
+    if (carried) log(`  ${key}: kept the table measured at ${carried} (${baseline.tables[key].carriedReason})`);
+  }
 
-  // The exit rule (D6): only --direct is judged against the file-name truth.
+  // The exit rule (D6): only --direct is judged against the file-name truth —
+  // plus a run that measured nothing at all, which confirms nothing and must
+  // not report success.
+  const empty = unmeasuredFailures(modes, tables);
+  for (const failure of empty) process.stderr.write(`diarize-bench: ${failure}\n`);
   const mismatches = countMismatches(tables.direct.rows);
   if (mismatches.length > 0) {
     process.stderr.write(
       `diarize-bench: ${mismatches.length} --direct count(s) disagree with the file name — ` +
         `${mismatches.map((m) => `${m.file}: found ${m.found}, name says ${m.truth}`).join('; ')}\n`
     );
-    return 1;
   }
-  return 0;
+  return empty.length > 0 || mismatches.length > 0 ? 1 : 0;
 }
 
 if (require.main === module) {
@@ -750,6 +870,8 @@ module.exports = {
   reportLines,
   summaryLine,
   countMismatches,
+  unmeasuredFailures,
+  flagProblem,
   buildBaseline,
   main,
 };

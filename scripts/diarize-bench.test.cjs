@@ -6,15 +6,22 @@
  * and baseline layer of `diarize-bench.cjs`, its exit rule, and the
  * provisioning decisions of `fetch-diarization-assets.cjs`.
  *
- * What is deliberately NOT here: the real runs. Those need the pinned models
- * and the four recordings (both gitignored), and the whole point of the bench
- * is that its numbers come from the real host — a mocked ORT would pin nothing
- * about diarization. The run path is exercised by ACTUALLY running the bench
- * (`node scripts/diarize-bench.cjs --direct`), whose verdict is committed at
- * `docs/bench/diarize-bench-baseline.json`; what this file guards is that the
- * verdict is reported honestly: a missing recording renders as a skip and
- * never as a row of numbers, and a count that disagrees with the file-name
- * truth fails the process instead of being written down as a success.
+ * The measurement table itself is NOT produced here: it needs the pinned
+ * models and the four recordings (both gitignored), and the whole point of the
+ * bench is that its numbers come from the real host — a mocked ORT would pin
+ * nothing about diarization. The table is produced by ACTUALLY running the
+ * bench (`node scripts/diarize-bench.cjs --direct --full-chain`), whose verdict
+ * is committed at `docs/bench/diarize-bench-baseline.json` and read back here
+ * for the properties a reader relies on. What this file guards is that the
+ * verdict is reported honestly: a missing recording renders as a skip and never
+ * as a row of numbers, a count that disagrees with the file-name truth fails
+ * the PROCESS (not just a predicate), and a run that measured nothing neither
+ * exits 0 nor overwrites the table a run that did measure something produced.
+ *
+ * Those last two are pinned by running the CLI for real. When the model set is
+ * on this machine they run against a scratch assets root under `test-assets/`
+ * with the 32.5 MB models hard-linked into it (no copy, no download); when it
+ * is not, they are skipped rather than faked — the `prod-csp.test.cjs` pattern.
  */
 
 const { execFileSync } = require('node:child_process');
@@ -100,7 +107,7 @@ function okRow(overrides = {}) {
     segmentCount: 9,
     overlapCount: 1,
     consistency: { pairs: 136, agree: 129, rate: 129 / 136 },
-    ms: { decode: 12, stem: null, resample: null, segment: 214, embed: 1893, assemble: 3, total: 2110 },
+    ms: { decode: 12, stemInit: null, stem: null, resample: null, segment: 214, embed: 1893, assemble: 3, total: 2110 },
     msPerAudioSecond: { stem: null, segment: 6.3, embed: 55.7, assemble: 0.1, total: 62.1 },
     ...overrides,
   };
@@ -192,7 +199,7 @@ describe('report lines', () => {
   });
 
   it('shows the stem stage only when the full chain ran it', () => {
-    const row = okRow({ ms: { ...okRow().ms, stem: 22417 }, msPerAudioSecond: { ...okRow().msPerAudioSecond, stem: 659.3 } });
+    const row = okRow({ ms: { ...okRow().ms, stemInit: 9631, stem: 22417 }, msPerAudioSecond: { ...okRow().msPerAudioSecond, stem: 659.3 } });
     expect(bench.formatRow(row)[10]).toBe('22417');
   });
 
@@ -337,6 +344,18 @@ describe('the CLI', () => {
     expect(out.code).toBe(2);
     expect(`${out.stdout}${out.stderr}`).toContain('--sideways');
   });
+
+  it('refuses to overwrite a verdict file it cannot read', () => {
+    // The merge needs the old file; a file that will not parse is a reason to
+    // stop, not a reason to blank whatever it holds. It stops BEFORE the run,
+    // so nobody loses four minutes of separation to it.
+    const bad = path.join(tmp, 'unreadable.json');
+    fs.writeFileSync(bad, 'not json at all\n');
+    const out = run([`--assets=${tmp}`, `--out=${bad}`, '--direct']);
+    expect(out.code).toBe(1);
+    expect(`${out.stdout}${out.stderr}`).toContain('refusing to overwrite it');
+    expect(fs.readFileSync(bad, 'utf8')).toBe('not json at all\n');
+  });
 });
 
 // ------------------------------------------------- fetch-diarization-assets
@@ -387,4 +406,345 @@ describe('fetch-diarization-assets.cjs', () => {
     const assets = path.join(ROOT, 'test-assets');
     expect(fetcher.modelDestinations(assets)).toEqual(getDiarizeModelPaths(assets));
   });
+});
+
+// ------------------------------------------------------------- flag parsing
+
+/**
+ * A BOOLEAN flag written with a value is the failure this section exists for:
+ * `--verify=true` and `--full-chain=1` both parse to the STRING 'true'/'1',
+ * which every `arg(...) === true` test in these scripts then reads as false.
+ * The read-only check became a 37 MB fetch, and `--full-chain` ran `--direct`.
+ */
+describe('flagProblem', () => {
+  it('accepts the documented forms of both scripts', () => {
+    expect(bench.flagProblem(['--direct'])).toBeNull();
+    expect(bench.flagProblem(['--full-chain', '--assets=x', '--out=y'])).toBeNull();
+    expect(bench.flagProblem([])).toBeNull();
+    expect(fetcher.flagProblem(['--verify', '--assets=x'])).toBeNull();
+    expect(fetcher.flagProblem([])).toBeNull();
+  });
+
+  it('refuses a boolean flag carrying a value, which parses as its opposite', () => {
+    expect(bench.flagProblem(['--full-chain=1'])).toMatch(/--full-chain takes no value/);
+    expect(bench.flagProblem(['--direct=true'])).toMatch(/--direct takes no value/);
+    expect(fetcher.flagProblem(['--verify=true'])).toMatch(/--verify takes no value/);
+    expect(fetcher.flagProblem(['--verify=0'])).toMatch(/--verify takes no value/);
+  });
+
+  it('still refuses a value flag with no value, and an unknown flag', () => {
+    expect(bench.flagProblem(['--assets'])).toMatch(/--assets needs a value/);
+    expect(bench.flagProblem(['--out'])).toMatch(/--out needs a value/);
+    expect(bench.flagProblem(['--sideways'])).toMatch(/unknown option --sideways/);
+    expect(fetcher.flagProblem(['--assets'])).toMatch(/--assets needs a value/);
+    expect(fetcher.flagProblem(['--fetch-everything'])).toMatch(/unknown option --fetch-everything/);
+  });
+});
+
+// ------------------------------------------ the baseline this run overwrites
+
+const MODELS_FIXTURE = [
+  { key: 'segmentation', filename: 'pyannote-segmentation-3.0.onnx', bytes: 5992913, sha256: '220ad67c' },
+];
+const MACHINE_FIXTURE = {
+  platform: 'win32',
+  arch: 'x64',
+  cpu: 'A CPU',
+  cpus: 16,
+  memGb: 64,
+  node: 'v24.13.0',
+  onnxruntimeNode: '1.27.0',
+};
+
+/** A committed-looking verdict: both tables measured, on two different files. */
+function committedBaseline(generated = '2026-09-05T20:00:00.000Z') {
+  return bench.buildBaseline({
+    generated,
+    machine: MACHINE_FIXTURE,
+    models: MODELS_FIXTURE,
+    direct: { ran: true, rows: [okRow()] },
+    fullChain: {
+      ran: true,
+      rows: [okRow({ file: '3-two-speakers-en.wav', audioSeconds: 54.8, speakerCount: 2 })],
+    },
+  });
+}
+
+describe('buildBaseline merges with the baseline it is about to overwrite', () => {
+  function rerun(over) {
+    return bench.buildBaseline({
+      generated: '2026-09-06T09:00:00.000Z',
+      machine: MACHINE_FIXTURE,
+      models: MODELS_FIXTURE,
+      previous: committedBaseline(),
+      ...over,
+    });
+  }
+
+  it('keeps the table this run did not produce, stamped with the run that did', () => {
+    const out = rerun({
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+    });
+    expect(out.tables.fullChain.rows).toEqual(committedBaseline().tables.fullChain.rows);
+    expect(out.tables.fullChain.measured).toBe(1);
+    expect(out.tables.fullChain.ran).toBe(true);
+    expect(out.tables.fullChain.carriedFrom).toBe('2026-09-05T20:00:00.000Z');
+    expect(out.tables.fullChain.carriedReason).toBe('not requested (run with --full-chain)');
+    // The table this run DID measure is this run's, with no carry stamp.
+    expect(out.tables.direct.carriedFrom).toBeUndefined();
+    expect(out.tables.direct.rows).toEqual([okRow()]);
+  });
+
+  it('does not let a run that measured nothing overwrite a table that did', () => {
+    const out = rerun({
+      direct: { ran: true, rows: [skippedRow(), skippedRow({ file: '1-two-speakers-en.wav' })] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+    });
+    expect(out.tables.direct.rows).toEqual(committedBaseline().tables.direct.rows);
+    expect(out.tables.direct.measured).toBe(1);
+    expect(out.tables.direct.carriedFrom).toBe('2026-09-05T20:00:00.000Z');
+    expect(out.tables.direct.carriedReason).toMatch(/measured nothing/);
+  });
+
+  it('publishes the honest empty table when there is nothing to carry', () => {
+    const out = bench.buildBaseline({
+      generated: '2026-09-06T09:00:00.000Z',
+      machine: MACHINE_FIXTURE,
+      models: MODELS_FIXTURE,
+      direct: { ran: true, rows: [okRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'the HT-Demucs model is not present' },
+      previous: null,
+    });
+    expect(out.tables.fullChain.ran).toBe(false);
+    expect(out.tables.fullChain.notRunReason).toBe('the HT-Demucs model is not present');
+    expect(out.tables.fullChain.rows).toEqual([]);
+    expect(out.tables.fullChain.carriedFrom).toBeUndefined();
+  });
+
+  it('will not carry a previous table that measured nothing either', () => {
+    const empty = bench.buildBaseline({
+      generated: '2026-09-05T20:00:00.000Z',
+      machine: MACHINE_FIXTURE,
+      models: MODELS_FIXTURE,
+      direct: { ran: true, rows: [skippedRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+    });
+    const out = rerun({
+      direct: { ran: true, rows: [skippedRow()] },
+      fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
+      previous: empty,
+    });
+    expect(out.tables.direct.rows).toEqual([skippedRow()]);
+    expect(out.tables.direct.carriedFrom).toBeUndefined();
+  });
+});
+
+// --------------------------------------------------- the empty-run exit rule
+
+describe('unmeasuredFailures', () => {
+  const table = (rows) => ({ ran: rows.length > 0, rows });
+
+  it('fails a mode that ran over no recording at all', () => {
+    expect(
+      bench.unmeasuredFailures(['--direct'], { direct: table([skippedRow()]), fullChain: table([]) })
+    ).toEqual(['--direct ran but measured nothing — no recording present']);
+  });
+
+  it('fails a run where no mode ran at all', () => {
+    expect(bench.unmeasuredFailures([], { direct: table([]), fullChain: table([]) })).toEqual([
+      'no mode ran — nothing was measured',
+    ]);
+  });
+
+  it('is clean when every attempted mode measured at least one row', () => {
+    expect(
+      bench.unmeasuredFailures(['--direct', '--full-chain'], {
+        direct: table([okRow(), skippedRow()]),
+        fullChain: table([okRow()]),
+      })
+    ).toEqual([]);
+  });
+});
+
+// ----------------------------------------------------- the committed verdict
+
+describe('docs/bench/diarize-bench-baseline.json', () => {
+  const committed = JSON.parse(
+    fs.readFileSync(path.join(ROOT, 'docs', 'bench', 'diarize-bench-baseline.json'), 'utf8')
+  );
+  const fullChainRows = committed.tables.fullChain.rows.filter((r) => r.status === 'ok');
+  const directRows = committed.tables.direct.rows.filter((r) => r.status === 'ok');
+
+  it('keeps the HT-Demucs session load OUT of the separation rate', () => {
+    // `msPerAudioSecond.stem` is read as a RATE — Task 8 compares it with
+    // MEASURED_REALTIME_FACTOR = 1.52 (658 ms per audio second). Folding the
+    // 165 MB session creation into the stage made it a fixed cost wearing a
+    // rate's units: it fell with file length instead of holding steady. The
+    // diarizer already reports its own session creation as `ms.init` and
+    // excludes it from `segment`/`embed`; the stem stage now does the same.
+    expect(fullChainRows.length).toBeGreaterThan(0);
+    for (const row of fullChainRows) {
+      expect(typeof row.ms.stemInit).toBe('number');
+      expect(row.ms.stemInit).toBeGreaterThan(0);
+      expect(row.ms.total).toBeGreaterThanOrEqual(row.ms.stem + row.ms.stemInit);
+      const rateFromStem = row.ms.stem / row.audioSeconds;
+      const rateWithInit = (row.ms.stem + row.ms.stemInit) / row.audioSeconds;
+      expect(Math.abs(row.msPerAudioSecond.stem - rateFromStem)).toBeLessThan(1);
+      expect(row.msPerAudioSecond.stem).toBeLessThan(rateWithInit - 1);
+    }
+  });
+
+  it('has no stem stage at all on the direct rows', () => {
+    expect(directRows.length).toBeGreaterThan(0);
+    for (const row of directRows) {
+      expect(row.ms.stem).toBeNull();
+      expect(row.ms.stemInit).toBeNull();
+      expect(row.msPerAudioSecond.stem).toBeNull();
+    }
+  });
+});
+
+// ------------------------------------------------------ the stem stage clock
+
+describe('the separation clock', () => {
+  // The committed baseline above can only catch a re-folded session load AFTER
+  // someone re-runs the bench. This catches it at the edit: `separateVocals`
+  // must create the session, stop that clock, and only then start the one whose
+  // number is published as a rate.
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'diarize-bench.cjs'), 'utf8');
+  const separateVocals = source.slice(
+    source.indexOf('async function separateVocals'),
+    source.indexOf('const round1 =')
+  );
+
+  it('starts only after the 165 MB session exists, and reports that cost separately', () => {
+    expect(separateVocals.length).toBeGreaterThan(0);
+    const initAt = separateVocals.indexOf("type: 'init'");
+    const clockAt = separateVocals.indexOf('const t0 = performance.now()');
+    expect(initAt).toBeGreaterThan(-1);
+    expect(clockAt).toBeGreaterThan(initAt);
+    expect(separateVocals).toContain('return { vocals, stemMs, stemInitMs };');
+  });
+});
+
+// ------------------------------------------- the CLI over the verified models
+
+const REAL_ASSETS = path.join(ROOT, 'test-assets');
+const { DIARIZE_FILES, getDiarizeModelPaths } = require(path.join(ROOT, 'electron', 'diarizeManager.cjs'));
+const REAL_MODEL_PATHS = getDiarizeModelPaths(REAL_ASSETS);
+const sizeOrNull = (p) => {
+  try {
+    return fs.statSync(p).size;
+  } catch {
+    return null;
+  }
+};
+const MODELS_PRESENT = DIARIZE_FILES.every((f) => sizeOrNull(REAL_MODEL_PATHS[f.key]) === f.bytes);
+const TWO_SPEAKER_WAV = path.join(REAL_ASSETS, 'diarization', '1-two-speakers-en.wav');
+const RECORDING_PRESENT = sizeOrNull(TWO_SPEAKER_WAV) === 512044;
+
+function runScript(script, args) {
+  try {
+    const stdout = execFileSync(process.execPath, [path.join(ROOT, 'scripts', script), ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { code: 0, stdout, stderr: '' };
+  } catch (err) {
+    return { code: err.status, stdout: err.stdout || '', stderr: err.stderr || '' };
+  }
+}
+
+/** A scratch assets root INSIDE `test-assets/` (gitignored, and on the same
+ * volume as the models, so the 32.5 MB set is hard-linked, never copied). */
+function linkedAssetsRoot(prefix) {
+  const root = fs.mkdtempSync(path.join(REAL_ASSETS, prefix));
+  const models = getDiarizeModelPaths(root);
+  for (const f of DIARIZE_FILES) {
+    fs.mkdirSync(path.dirname(models[f.key]), { recursive: true });
+    fs.linkSync(REAL_MODEL_PATHS[f.key], models[f.key]);
+  }
+  fs.mkdirSync(path.join(root, 'diarization'), { recursive: true });
+  return root;
+}
+
+(MODELS_PRESENT ? describe : describe.skip)('the CLI with the model set verified', () => {
+  const roots = [];
+
+  afterAll(() => {
+    for (const r of roots) fs.rmSync(r, { recursive: true, force: true });
+  });
+
+  it('refuses to publish a verdict for a run that measured nothing, and keeps the old one', () => {
+    const root = linkedAssetsRoot('bench-empty-');
+    roots.push(root);
+    const out = path.join(root, 'out.json');
+    const before = committedBaseline();
+    fs.writeFileSync(out, `${JSON.stringify(before, null, 2)}\n`);
+
+    const res = runScript('diarize-bench.cjs', [`--assets=${root}`, `--out=${out}`, '--direct']);
+    expect(res.code).toBe(1);
+    expect(`${res.stdout}${res.stderr}`).toContain('--direct ran but measured nothing');
+
+    // The committed verdict survives a run that measured nothing — both
+    // tables, with the run that produced them named.
+    const after = JSON.parse(fs.readFileSync(out, 'utf8'));
+    expect(after.tables.direct.rows).toEqual(before.tables.direct.rows);
+    expect(after.tables.fullChain.rows).toEqual(before.tables.fullChain.rows);
+    expect(after.tables.direct.carriedFrom).toBe(before.generated);
+    expect(after.generated).not.toBe(before.generated);
+  }, 120000);
+
+  (RECORDING_PRESENT ? it : it.skip)(
+    'exits 1 when a --direct count disagrees with the file name',
+    () => {
+      // The two-speaker recording under the four-speaker name: the detector is
+      // right and the truth is wrong, which is exactly the shape of a
+      // regression this exit code has to catch. It is the only test that runs
+      // the real host, and it is skipped when the assets are not on the disk.
+      const root = linkedAssetsRoot('bench-mislabelled-');
+      roots.push(root);
+      fs.linkSync(TWO_SPEAKER_WAV, path.join(root, 'diarization', '0-four-speakers-zh.wav'));
+      const out = path.join(root, 'out.json');
+
+      const res = runScript('diarize-bench.cjs', [`--assets=${root}`, `--out=${out}`, '--direct']);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain('0-four-speakers-zh.wav: found 2, name says 4');
+      const written = JSON.parse(fs.readFileSync(out, 'utf8'));
+      expect(written.tables.direct.correct).toBe(0);
+      expect(written.tables.direct.measured).toBe(1);
+    },
+    300000
+  );
+});
+
+// ---------------------------------------------------------- the fetcher CLI
+
+describe('the fetcher CLI', () => {
+  let tmp;
+
+  beforeAll(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'diarize-fetch-'));
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('reports every missing asset and exits 1 WITHOUT downloading anything', () => {
+    const res = runScript('fetch-diarization-assets.cjs', [`--assets=${tmp}`, '--verify']);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toContain('MISSING');
+    expect(res.stdout).toContain('6 asset(s) missing or off their pin');
+    expect(fs.readdirSync(tmp)).toEqual([]);
+  }, 60000);
+
+  it('refuses --verify=true instead of turning the read-only check into a fetch', () => {
+    const res = runScript('fetch-diarization-assets.cjs', [`--assets=${tmp}`, '--verify=true']);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('--verify takes no value');
+    expect(fs.readdirSync(tmp)).toEqual([]);
+  }, 60000);
 });

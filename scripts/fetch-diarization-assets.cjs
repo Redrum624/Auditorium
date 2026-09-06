@@ -146,27 +146,38 @@ function arg(name) {
   return hit.includes('=') ? hit.slice(name.length + 3) : true;
 }
 
-const KNOWN_FLAGS = new Set(['--assets', '--verify']);
+/** Options that MUST carry a value. */
+const VALUE_FLAGS = new Set(['--assets']);
+/** Options that must NOT carry one. `--verify=true` parses to the STRING
+ * 'true', which `arg('verify') === true` reads as false — so the read-only
+ * check silently became a full fetch: a file deleted and 37 MB pulled by the
+ * one flag whose whole purpose is to touch nothing. A boolean written with a
+ * value is a typo, and a typo here costs a download. */
+const BOOLEAN_FLAGS = new Set(['--verify']);
+const KNOWN_FLAGS = new Set([...VALUE_FLAGS, ...BOOLEAN_FLAGS]);
 
-/** A mistyped flag must not be read as "fetch everything into the default
- * tree" — that is a 37 MB download the caller did not ask for. `--assets`
- * without a value is the same mistake in the other direction. */
-function checkFlags() {
-  for (const a of process.argv.slice(2)) {
+const USAGE = 'usage: node scripts/fetch-diarization-assets.cjs [--assets=<dir>] [--verify]\n';
+
+/**
+ * What is wrong with this argv, or `null` when nothing is. A mistyped flag
+ * must not be read as "fetch everything into the default tree" — that is a
+ * 37 MB download the caller did not ask for. `--assets` without a value is the
+ * same mistake in the other direction, and `--verify=<anything>` the third.
+ */
+function flagProblem(argv) {
+  for (const a of argv) {
     const name = a.split('=')[0];
     if (!KNOWN_FLAGS.has(name)) {
-      process.stderr.write(
-        `fetch-diarization-assets: unknown option ${name}\n` +
-          'usage: node scripts/fetch-diarization-assets.cjs [--assets=<dir>] [--verify]\n'
-      );
-      return false;
+      return `fetch-diarization-assets: unknown option ${name}\n${USAGE}`;
     }
-    if (name === '--assets' && !a.includes('=')) {
-      process.stderr.write('fetch-diarization-assets: --assets needs a value, as --assets=<dir>\n');
-      return false;
+    if (VALUE_FLAGS.has(name) && !a.includes('=')) {
+      return `fetch-diarization-assets: ${name} needs a value, as ${name}=<dir>\n`;
+    }
+    if (BOOLEAN_FLAGS.has(name) && a.includes('=')) {
+      return `fetch-diarization-assets: ${name} takes no value — write it as ${name}\n`;
     }
   }
-  return true;
+  return null;
 }
 
 async function fetchRecording(entry, dest, log) {
@@ -190,7 +201,11 @@ async function fetchRecording(entry, dest, log) {
 }
 
 async function main() {
-  if (!checkFlags()) return 2;
+  const problem = flagProblem(process.argv.slice(2));
+  if (problem) {
+    process.stderr.write(problem);
+    return 2;
+  }
   const assetsArg = arg('assets');
   const assetsDir = typeof assetsArg === 'string' ? path.resolve(assetsArg) : DEFAULT_ASSETS;
   const verifyOnly = arg('verify') === true;
@@ -280,6 +295,7 @@ module.exports = {
   RECORDING_DIR,
   RECORDING_RELEASE,
   SIDECAR_NAME,
+  flagProblem,
   modelDestinations,
   planFile,
   sidecarText,
