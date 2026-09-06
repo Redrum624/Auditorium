@@ -325,6 +325,17 @@ async function nextChild(children, index = 0) {
   return children[index];
 }
 
+/** Sentinel for a run that never settles, so a hang fails as a value
+ * mismatch in ~250 ms instead of a 5 s Jest timeout. The timer is unref'd
+ * so the winning race does not hold the worker open. */
+const HUNG = { hung: true };
+function hangSentinel(ms = 250) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(HUNG), ms);
+    if (typeof t.unref === 'function') t.unref();
+  });
+}
+
 /** Manager whose model files all verify (in-memory). */
 function makeManager({ files = makeFakeFiles(), killReturns = true } = {}) {
   const stores = {};
@@ -546,6 +557,34 @@ describe('createDiarizeManager.startDiarization', () => {
     const after = await manager.startDiarization({ sampleRate: 16000, samples: SAMPLES });
     expect(after.ok).toBe(false);
     expect(after.error).toMatch(/disposed/);
+  });
+
+  // The slot is reserved SYNCHRONOUSLY (D2), before the sha256 pass, so Cancel
+  // and app-quit can both land while verification is still in flight — the one
+  // window in which the run has no child to kill yet. The mid-verify settled
+  // check is what stops it: without it the run walks on to the fork and then
+  // installs its resolve into an already-settled entry, so the promise never
+  // settles and the freshly spawned host is never killed (an ORT arena and the
+  // job buffer left resident). Every other cancel/dispose test here awaits the
+  // child first, so only these two cover that window.
+  test('cancel DURING verification settles cancelled and never spawns a host', async () => {
+    const { manager, children } = makeManager();
+    const promise = manager.startDiarization({ sampleRate: 16000, samples: SAMPLES });
+    expect(manager.cancel()).toBe(true); // no await: verification is still running
+    expect(await Promise.race([promise, hangSentinel()])).toEqual({ ok: false, cancelled: true });
+    expect(children).toHaveLength(0);
+    expect(manager.isRunning()).toBe(false);
+  });
+
+  test('dispose DURING verification settles cancelled and never spawns a host', async () => {
+    const { manager, children } = makeManager();
+    const promise = manager.startDiarization({ sampleRate: 16000, samples: SAMPLES });
+    manager.dispose();
+    expect(await Promise.race([promise, hangSentinel()])).toEqual({ ok: false, cancelled: true });
+    expect(children).toHaveLength(0);
+    const after = await manager.startDiarization({ sampleRate: 16000, samples: SAMPLES });
+    expect(after.error).toMatch(/disposed/);
+    expect(children).toHaveLength(0);
   });
 });
 

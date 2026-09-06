@@ -515,6 +515,38 @@ describe('segmentation run', () => {
     expect(h.posted[h.posted.length - 1]).toEqual({ type: 'done', id: 1, windowCount: 33 });
   });
 
+  test('the padded final window is zeroed even when its slot carries a previous batch (34 windows)', async () => {
+    // The zero-fill in segment() is only load-bearing when the padded window
+    // does NOT land in the first, freshly-allocated batch. 677,000 samples =
+    // 33 full windows + a padded 34th, so the padded window is index 33 —
+    // slot 1 of the SECOND batch, whose slot 1 still holds window 1. Without
+    // the fill the model is fed window 1's audio as the tail of window 33:
+    // corrupt input for the last 10 s of any track past ~5.4 min whose length
+    // is not a whole number of 16,000-sample shifts (the common case).
+    const total = SEG_WINDOW + SEG_BATCH * SEG_SHIFT + 5000; // 677000
+    expect(planWindows(total)).toEqual({ count: 34, hasLast: true });
+    const contentLen = total - 33 * SEG_SHIFT; // 149000 real samples in window 33
+    const h = makeHost({ probe: [0, contentLen - 1, contentLen, SEG_WINDOW - 1] });
+    await initHost(h);
+    const job = ramp(total);
+    await runJob(h, job);
+
+    const seg = h.seg();
+    expect(seg.runDims).toEqual([[SEG_BATCH, 1, SEG_WINDOW], [2, 1, SEG_WINDOW]]);
+    expect(seg.buffers[1]).toBe(seg.buffers[0]); // one buffer, so slot 1 arrives dirty
+    // Slot 1 of the first batch really held window 1 at those offsets — the
+    // samples the fill must overwrite, so the zeros below are not vacuous.
+    expect(seg.echo[1][contentLen]).toBe(job[SEG_SHIFT + contentLen]);
+    expect(seg.echo[1][SEG_WINDOW - 1]).toBe(job[SEG_SHIFT + SEG_WINDOW - 1]);
+    // Window 33: its own audio to the job's end, then zeros — never window 1's.
+    expect(seg.echo[33][0]).toBe(job[33 * SEG_SHIFT]);
+    expect(seg.echo[33][contentLen - 1]).toBe(job[total - 1]);
+    expect(seg.echo[33][contentLen]).toBe(0);
+    expect(seg.echo[33][SEG_WINDOW - 1]).toBe(0);
+    expect(h.posted.filter((m) => m.type === 'window')).toHaveLength(34);
+    expect(h.posted[h.posted.length - 1]).toEqual({ type: 'done', id: 1, windowCount: 34 });
+  });
+
   test('a segmentation output with the wrong shape is a run error, not a silent misread', async () => {
     const h = makeHost();
     await initHost(h);
