@@ -1382,13 +1382,23 @@ describe('separateSpeakersLand (D4/D6)', () => {
   const VOCALS_WEIGHT = 0.19;
 
   /** Distinct, non-trivial content per channel, as `addVoiceDoc` above: a
-   *  landing measured on silence would pass with the mask inverted. */
+   *  landing measured on silence would pass with the mask inverted.
+   *
+   *  Channel 1 is the LOUDER side on purpose (a bigger amplitude AND the
+   *  offset that adds to its own troughs): both measurements the summary
+   *  reports — `channelsPeak` and `peakOutsideSpans` — take a max over EVERY
+   *  channel, and on a fixture where channel 0 dominates, a loop that never
+   *  left channel 0 would produce the same numbers. With the peak living on
+   *  channel 1, every expectation below is derived from a sample the
+   *  measurement can only reach by scanning both. */
   function addSpeakerDoc(name = 'talk.wav', samples = 2 * 44100, channelCount = 2): AudioDocument {
     const channels: Float32Array[] = [];
     for (let c = 0; c < channelCount; c++) {
       const ch = new Float32Array(samples);
       for (let i = 0; i < ch.length; i++) {
-        ch[i] = 0.4 * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) + (c === 0 ? 0.05 : -0.03);
+        ch[i] =
+          (0.4 + 0.06 * c) * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) +
+          (c === 0 ? 0.05 : -0.03);
       }
       channels.push(ch);
     }
@@ -1459,6 +1469,12 @@ describe('separateSpeakersLand (D4/D6)', () => {
     // here. "> 0" passes on any constant at all, and it passes on a landing
     // that took the wrong stem (0.37x, 0.23x or 0.11x).
     const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+    // That peak lives on channel 1 (see `addSpeakerDoc`), pinned here because
+    // it is what makes every expectation in this describe a number the
+    // measurement can only reach by scanning BOTH channels: hand the peak back
+    // to channel 0 and a `channelsPeak` that stopped after the first channel
+    // would report the same value again.
+    expect(peakOf([source.channels[1]])).toBeGreaterThan(peakOf([source.channels[0]]));
     expect(summary.outsideSpansPeak).toBe(0);
     expect(summary.speakerPeaks).toHaveLength(2);
     for (const peak of summary.speakerPeaks) expect(peak).toBeCloseTo(stemPeak, 6);
@@ -1498,6 +1514,67 @@ describe('separateSpeakersLand (D4/D6)', () => {
     expect(summary.outsideSpansPeak).toBe(0);
   });
 
+  it('reads the head, the gaps between the spans and the tail, each on its own', () => {
+    const t = api();
+    const source = addSpeakerDoc('talk.wav');
+    const length = source.channels[0].length;
+
+    t.separateSpeakersLand(2);
+
+    // Three regions lie outside a span set — the head, the gaps and the tail —
+    // and the shipped hook leans on the GAPS: it measures speaker k against
+    // speaker k's OWN turns, where the gaps between those turns are the only
+    // place the reported 0 proves anything. Handed one span set they are
+    // interchangeable (this fixture reaches the same peak in each), so each is
+    // isolated here by a span set that leaves only that one region uncovered.
+    // A measurement that dropped two of the three would still answer the test
+    // above; it cannot answer all four of these.
+    const spans = segmentsToDocSamples(
+      assembleDiarization(syntheticSpeakerEvidence(length, 44100), { speakerCount: 2 }),
+      44100,
+      length
+    );
+    expect(spans[0]).toHaveLength(2);
+    const [firstTurn, secondTurn] = spans[0];
+    const speaker1 = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'talk.wav — Speaker 1');
+    expect(speaker1).toBeDefined();
+    const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+
+    // HEAD alone: one span from the end of the first turn to the end of the
+    // document — no gap, an empty tail, and the first turn's audio entirely
+    // before it.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: firstTurn.endSample, endSample: length },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // GAP alone: two spans that reach the document's own ends, so head and tail
+    // are empty by construction and the first turn lies between them.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: 0, endSample: firstTurn.startSample },
+        { startSample: firstTurn.endSample, endSample: length },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // TAIL alone: one span from 0 to the start of the second turn, which is
+    // then the only audio left uncovered.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [
+        { startSample: 0, endSample: secondTurn.startSample },
+      ])
+    ).toBeCloseTo(stemPeak, 6);
+
+    // And 0 when the whole document is covered — the contrast that makes the
+    // three numbers above region measurements rather than the document's peak.
+    expect(
+      peakOutsideSpans(speaker1!.channels, [{ startSample: 0, endSample: length }])
+    ).toBe(0);
+  });
+
   it('reports the audio a mask leaves behind, which is what makes that 0 evidence', () => {
     const t = api();
     const source = addSpeakerDoc('talk.wav');
@@ -1518,6 +1595,39 @@ describe('separateSpeakersLand (D4/D6)', () => {
       6
     );
   });
+
+  it.each([0, 1])(
+    'aggregates over every speaker document, not one of them — speaker %i unmasked',
+    (unmasked) => {
+      const t = api();
+      const source = addSpeakerDoc('talk.wav');
+      // `outsideSpansPeak` is the worst sample over EVERY speaker document and
+      // `speakerPeaks` is one entry per document, and on this fixture the two
+      // landed documents are identical — so a loop that measured a single k
+      // would report exactly the same summary. One speaker's mask is therefore
+      // replaced by a HALF-GAIN pass-through (nothing silenced, and the turns
+      // themselves at half level): that document is then the only one carrying
+      // audio outside its turns AND the only one whose peak is not the stem's,
+      // so both fields can only be right if the run visited the k it landed at.
+      const real = spanMask.keepSpans;
+      let call = 0;
+      jest
+        .spyOn(spanMask, 'keepSpans')
+        .mockImplementation((channels, spans, sampleRate) =>
+          call++ === unmasked
+            ? channels.map((ch) => Float32Array.from(ch, (v) => v * 0.5))
+            : real(channels, spans, sampleRate)
+        );
+
+      const summary = t.separateSpeakersLand(2);
+
+      const stemPeak = Math.fround(VOCALS_WEIGHT * peakOf(source.channels));
+      expect(summary.speakerPeaks).toHaveLength(2);
+      expect(summary.speakerPeaks[unmasked]).toBeCloseTo(stemPeak / 2, 6);
+      expect(summary.speakerPeaks[1 - unmasked]).toBeCloseTo(stemPeak, 6);
+      expect(summary.outsideSpansPeak).toBeCloseTo(stemPeak / 2, 6);
+    }
+  );
 
   it('routes a MONO source as dual-mono across every landed track, and says so', () => {
     const t = api();

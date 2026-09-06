@@ -1499,7 +1499,10 @@ export function syntheticSpeakerEvidence(lengthSamples: number, sampleRate: numb
   return { totalSamples16k, windows, embeddings };
 }
 
-/** The worst |sample| over every channel of a landed document. */
+/** The worst |sample| over every channel of a landed document. EVERY channel:
+ * the fixture its tests run on carries its peak on channel 1 (`testHooks.test.ts`,
+ * `addSpeakerDoc`), so a scan that stopped at the first channel reports a
+ * different number rather than the same one. */
 function channelsPeak(channels: readonly Float32Array[]): number {
   let peak = 0;
   for (const ch of channels) {
@@ -1525,6 +1528,14 @@ function channelsPeak(channels: readonly Float32Array[]): number {
  * pinned on BOTH sides of that identity by running it here on channels whose
  * audio lies OUTSIDE the spans it is handed — the other speaker's turns over
  * the same landed document — where it has to report that document's own peak.
+ *
+ * The three regions also answer for each other on any single span set: this
+ * fixture reaches the same peak in the head, in the gaps and in the tail, so
+ * whichever one is scanned produces the expected number. The test therefore
+ * isolates them — one span set per region, each leaving only that region
+ * uncovered — and the GAPS are the region the shipped hook rests on, since it
+ * measures speaker k against speaker k's OWN turns and the silence between
+ * those turns is the whole of the mask evidence.
  */
 export function peakOutsideSpans(
   channels: readonly Float32Array[],
