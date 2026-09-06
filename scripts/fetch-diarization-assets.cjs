@@ -40,17 +40,23 @@
  *
  *   test-assets/diarization/SHA256SUMS.txt
  *       — a sidecar recording what was fetched, in `sha256sum -c` format.
- *         Optional and never required: nothing in the app, the suite or the
- *         bench reads it. The recordings are pinned by SIZE here (the sizes
- *         the release serves, confirmed against `Content-Length`), because
- *         no upstream digest is published for them; the sidecar is where the
- *         digest this machine actually got is written down so a later fetch
- *         on another machine can be compared to it by hand.
+ *         Optional and never required (nothing in the app or the bench reads
+ *         it), but once it exists it is a RECORD, not a note: the recordings
+ *         are pinned by SIZE here (the sizes the release serves, confirmed
+ *         against `Content-Length`) because upstream publishes no digest for
+ *         them, and a file swapped for a different one of the same byte count
+ *         passes that pin. So every run that finds a recording present checks
+ *         its digest against what this file already records — `--verify`
+ *         reports a MISMATCH and fails, and a fetch run refuses to rewrite the
+ *         record it disagrees with. Recomputing the digests and writing them
+ *         back unconditionally, which is what this used to do, replaces the
+ *         only evidence of what was fetched with a description of whatever is
+ *         on the disk now.
  *
  * Idempotent by construction: a file already at its pinned size (models: at
  * their pinned sha256) is left untouched and reported as present, so a second
  * run downloads nothing. `--verify` never downloads at all — it reports and
- * exits 1 if anything is missing or off its pin.
+ * exits 1 if anything is missing, off its pin, or off its recorded digest.
  */
 
 const fs = require('node:fs');
@@ -128,6 +134,43 @@ function sidecarText(rows) {
   return `${[...header, ...rows.map((r) => `${r.sha256} *${r.filename}`)].join('\n')}\n`;
 }
 
+/**
+ * The digests a sidecar records, by filename. `sha256sum` writes ` *name` for
+ * a binary file and two spaces for a text one; both are its own output, so
+ * both read back. Comment and blank lines are the provenance header above.
+ */
+function parseSidecar(text) {
+  const recorded = new Map();
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const hit = /^([0-9a-f]+)\s+\*?(.+)$/i.exec(trimmed);
+    if (hit) recorded.set(hit[2].trim(), hit[1].toLowerCase());
+  }
+  return recorded;
+}
+
+/** The sidecar already at `dir`, or an empty record when there is none. */
+function readSidecar(dir) {
+  try {
+    return parseSidecar(fs.readFileSync(path.join(dir, SIDECAR_NAME), 'utf8'));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Every file whose digest disagrees with the one already recorded for that
+ * name. A name with no record is NOT a mismatch — it is a new row to write
+ * down; a recorded name with no file is a missing file, which the size pass
+ * reports on its own.
+ */
+function sidecarMismatches(recorded, rows) {
+  return rows
+    .filter((r) => recorded.has(r.filename) && recorded.get(r.filename) !== r.sha256)
+    .map((r) => ({ filename: r.filename, recorded: recorded.get(r.filename), actual: r.sha256 }));
+}
+
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -146,8 +189,17 @@ function sizeOf(filePath) {
   }
 }
 
-function mib(bytes) {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+/**
+ * DECIMAL MB, the unit every download size in this app is quoted in: D2 pins
+ * the diarization set at 32,523,463 B and D5's model gate shows "32.5 MB",
+ * `diarizeService.ts` says "about 32.5 MB, one time", and `e2e-smoke.cjs`
+ * renders every model size as `expectedBytes / 1e6`. Dividing by 1024² instead
+ * printed "31.0 MB" for those same bytes — the one figure in this file that
+ * disagreed with its own prose below ("the 32.5 MB model set") and with the
+ * line the operator is comparing it against in the app.
+ */
+function mb(bytes) {
+  return `${(bytes / 1e6).toFixed(1)} MB`;
 }
 
 function arg(name) {
@@ -214,7 +266,7 @@ async function fetchRecording(entry, dest, log) {
   const tmp = `${dest}.part`;
   fs.writeFileSync(tmp, buf);
   fs.renameSync(tmp, dest);
-  log(`  fetched  ${entry.filename} (${mib(entry.bytes)})`);
+  log(`  fetched  ${entry.filename} (${mb(entry.bytes)})`);
 }
 
 async function main() {
@@ -231,13 +283,13 @@ async function main() {
   log(`diarization assets → ${assetsDir}`);
 
   // ---------------------------------------------------------------- models
-  log(`models (${mib(DIARIZE_TOTAL_BYTES)} total)`);
+  log(`models (${mb(DIARIZE_TOTAL_BYTES)} total)`);
   const paths = modelDestinations(assetsDir);
   const missingModels = [];
   for (const f of DIARIZE_FILES) {
     const verdict = await verifyModelFile(paths[f.key], { expectedSha256: f.sha256, expectedBytes: f.bytes });
     if (verdict.ok) {
-      log(`  present  ${f.filename} (${mib(f.bytes)}, sha256 verified)`);
+      log(`  present  ${f.filename} (${mb(f.bytes)}, sha256 verified)`);
     } else {
       missingModels.push({ file: f, verdict });
       log(`  ${verifyOnly ? 'MISSING' : 'need'}     ${f.filename} — ${verdict.reason} (${verdict.detail})`);
@@ -257,11 +309,13 @@ async function main() {
   const recordingDir = path.join(assetsDir, RECORDING_DIR);
   log('recordings (16 kHz mono PCM, sherpa-onnx test material — not redistributed)');
   const missingRecordings = [];
+  const onDisk = [];
   for (const entry of RECORDINGS) {
     const dest = path.join(recordingDir, entry.filename);
     const plan = planFile(sizeOf(dest), entry.bytes);
     if (plan === 'present') {
-      log(`  present  ${entry.filename} (${mib(entry.bytes)})`);
+      onDisk.push(entry);
+      log(`  present  ${entry.filename} (${mb(entry.bytes)})`);
       continue;
     }
     if (verifyOnly) {
@@ -274,10 +328,37 @@ async function main() {
       fs.rmSync(dest, { force: true });
     }
     await fetchRecording(entry, dest, log);
+    onDisk.push(entry);
+  }
+
+  // --------------------------------------------------------------- sidecar
+  // The digests of what is actually on this disk, against what the sidecar
+  // already records. This is the ONLY check that can see a recording swapped
+  // for a different file of the same byte count — the size pin above calls
+  // that impostor "present", and upstream publishes no digest to check it
+  // with. A run that recomputed the record and wrote it back over itself
+  // could not fail this way, and destroyed the evidence while it was at it.
+  const recorded = readSidecar(recordingDir);
+  const rows = [];
+  for (const entry of onDisk) {
+    rows.push({ filename: entry.filename, sha256: await sha256File(path.join(recordingDir, entry.filename)) });
+  }
+  const mismatches = sidecarMismatches(recorded, rows);
+  for (const m of mismatches) {
+    log(`  MISMATCH ${m.filename} — ${SIDECAR_NAME} records ${m.recorded}, this file is ${m.actual}`);
+  }
+  const checked = rows.filter((r) => recorded.has(r.filename) && !mismatches.some((m) => m.filename === r.filename));
+  for (const r of checked) log(`  ok       ${r.filename} — sha256 matches ${SIDECAR_NAME}`);
+  if (recorded.size === 0) {
+    log(
+      verifyOnly
+        ? `  no ${SIDECAR_NAME} yet — nothing recorded to check these recordings against`
+        : `  no ${SIDECAR_NAME} yet — this run writes the first record`
+    );
   }
 
   if (verifyOnly) {
-    const missing = missingModels.length + missingRecordings.length;
+    const missing = missingModels.length + missingRecordings.length + mismatches.length;
     if (missing > 0) {
       log(`${missing} asset(s) missing or off their pin — run without --verify to fetch them`);
       return 1;
@@ -286,12 +367,18 @@ async function main() {
     return 0;
   }
 
-  // --------------------------------------------------------------- sidecar
-  const rows = [];
-  for (const entry of RECORDINGS) {
-    rows.push({ filename: entry.filename, sha256: await sha256File(path.join(recordingDir, entry.filename)) });
-  }
   const sidecar = path.join(recordingDir, SIDECAR_NAME);
+  if (mismatches.length > 0) {
+    // The record and the disk disagree. Which one is right is not this
+    // script's call to make silently: overwriting the record would erase the
+    // digest of the file that WAS fetched, and it is the only copy of it.
+    process.stderr.write(
+      `fetch-diarization-assets: ${mismatches.length} recording(s) differ from the digests ` +
+        `${path.relative(ROOT, sidecar) || sidecar} records — the sidecar is left as it is. Delete the ` +
+        'recording(s) and re-run to fetch them again, or delete the sidecar to record what is here now.\n'
+    );
+    return 1;
+  }
   fs.writeFileSync(sidecar, sidecarText(rows));
   log(`wrote ${path.relative(ROOT, sidecar) || sidecar}`);
   return 0;
@@ -309,6 +396,10 @@ if (require.main === module) {
 
 module.exports = {
   RECORDINGS,
+  mb,
+  parseSidecar,
+  readSidecar,
+  sidecarMismatches,
   RECORDING_DIR,
   RECORDING_RELEASE,
   SIDECAR_NAME,

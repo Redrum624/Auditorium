@@ -405,6 +405,56 @@ const POLICY = Object.freeze({
   anchorMinShare: ANCHOR_MIN_SHARE,
 });
 
+/**
+ * Every constant this bench COPIES from `src/dsp/diarization.ts`, against
+ * which `loadDsp` checks the shipped module before a single number is
+ * measured. Two groups, one rule:
+ *
+ *   - the four POLICY numbers, because the baseline PUBLISHES them and a JSON
+ *     that quotes a threshold the DSP no longer runs is a false record;
+ *   - the four metric constants above (SEG_SHIFT / FRAME_SHIFT / SEG_FRAMES /
+ *     POWERSET), because the anchored column is computed FROM them here, in a
+ *     second copy of the model geometry. A drift there does not fail — it
+ *     reports a different metric under the same column name, and no fixture
+ *     can see it: `trunc(16000/271 + 0.5)` is still 59, so even a FRAME_SHIFT
+ *     off by one leaves `audioAnchoredConsistency`'s own tests green.
+ *
+ * `anchorMinShare` is deliberately NOT here. It is the bench's own metric
+ * parameter (the sweep's `overlap80`), the DSP has no counterpart to compare
+ * it against, and the entry that used to sit in this check compared
+ * ANCHOR_MIN_SHARE with ANCHOR_MIN_SHARE — an identity that could never fire.
+ */
+const SHIPPED_CONSTANTS = Object.freeze({
+  threshold: POLICY.threshold,
+  minClusterSize: POLICY.minClusterSize,
+  minSpeakerShare: POLICY.minSpeakerShare,
+  maxSpeakers: POLICY.maxSpeakers,
+  segShift: SEG_SHIFT,
+  frameShift: FRAME_SHIFT,
+  segFrames: SEG_FRAMES,
+  powerset: POWERSET,
+});
+
+/**
+ * Every copied constant the shipped DSP no longer agrees with, in declaration
+ * order. Compared by VALUE, so a reordered POWERSET — same shape, same
+ * members, different classes — is drift, and a constant that vanished under a
+ * rename reads as drift rather than as a quietly matching `undefined`.
+ */
+function constantDrift(shipped) {
+  const drift = [];
+  for (const key of Object.keys(SHIPPED_CONSTANTS)) {
+    const mine = SHIPPED_CONSTANTS[key];
+    const theirs = shipped ? shipped[key] : undefined;
+    const same =
+      typeof mine === 'object' && mine !== null
+        ? JSON.stringify(theirs) === JSON.stringify(mine)
+        : theirs === mine;
+    if (!same) drift.push({ key, shipped: theirs, bench: mine });
+  }
+  return drift;
+}
+
 // ------------------------------------------------------- the run (lazy deps)
 
 /** onnxruntime, the TypeScript require hook and the renderer DSP are loaded
@@ -431,22 +481,26 @@ function loadDsp() {
   const clustering = require(path.join(ROOT, 'src', 'dsp', 'speakerClustering.ts'));
   const wavCodec = require(path.join(ROOT, 'src', 'audio', 'wavCodec.ts'));
   const resample = require(path.join(ROOT, 'src', 'dsp', 'resample.ts'));
-  // The baseline states the constants it was produced under; if the shipped
-  // DSP ever moves one, the JSON must not keep quoting the old value.
-  const shipped = {
+  // The baseline states the constants it was produced under and the anchored
+  // column is computed from a second copy of the model geometry; if the
+  // shipped DSP ever moves one of either group, the run stops here rather than
+  // quoting the old value or measuring under a different one.
+  const drift = constantDrift({
     threshold: diarization.DIARIZE_THRESHOLD,
     minClusterSize: diarization.MIN_CLUSTER_SIZE,
     minSpeakerShare: diarization.MIN_SPEAKER_SHARE,
     maxSpeakers: diarization.MAX_SPEAKERS,
-    anchorMinShare: ANCHOR_MIN_SHARE,
-  };
-  for (const key of Object.keys(POLICY)) {
-    if (shipped[key] !== POLICY[key]) {
-      throw new Error(
-        `diarize-bench: src/dsp/diarization.ts now has ${key} = ${shipped[key]}, this bench reports ${POLICY[key]} — ` +
-          're-tuning a constant means a new bench run, not an edited baseline'
-      );
-    }
+    segShift: diarization.SEG_SHIFT,
+    frameShift: diarization.FRAME_SHIFT,
+    segFrames: diarization.SEG_FRAMES,
+    powerset: diarization.POWERSET,
+  });
+  if (drift.length > 0) {
+    throw new Error(
+      `diarize-bench: src/dsp/diarization.ts now has ${drift
+        .map((d) => `${d.key} = ${JSON.stringify(d.shipped)}, this bench uses ${JSON.stringify(d.bench)}`)
+        .join('; ')} — re-tuning a constant means a new bench run, not an edited baseline`
+    );
   }
   dsp = { diarization, clustering, wavCodec, resample };
   return dsp;
@@ -912,6 +966,9 @@ module.exports = {
   ANCHOR_MIN_SHARE,
   COLUMNS,
   POLICY,
+  SHIPPED_CONSTANTS,
+  constantDrift,
+  loadDsp,
   speakersFromFilename,
   audioAnchoredConsistency,
   formatRow,

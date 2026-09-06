@@ -18,13 +18,23 @@
  * the PROCESS (not just a predicate), and a run that measured nothing neither
  * exits 0 nor overwrites the table a run that did measure something produced.
  *
- * Those last two are pinned by running the CLI for real. When the model set is
- * on this machine they run against a scratch assets root under `test-assets/`
- * with the 32.5 MB models hard-linked into it (no copy, no download); when it
- * is not, they are skipped rather than faked — the `prod-csp.test.cjs` pattern.
+ * Those last two are pinned by running the CLI for real, as is the fetcher's
+ * refusal to overwrite a digest SHA256SUMS.txt already records. When the model
+ * set is on this machine they run against a scratch assets root under
+ * `test-assets/` with the 32.5 MB models (and, for the fetcher, the four
+ * recordings) hard-linked into it — no copy, no download; when it is not, they
+ * are skipped rather than faked, the `prod-csp.test.cjs` pattern, and the
+ * module says out loud which pins are missing so a green run on a bare machine
+ * cannot be mistaken for a complete one.
+ *
+ * The bench's copies of the shipped DSP constants are checked here too — the
+ * pure comparison in-process, and the guard `loadDsp` arms with it in a child
+ * node, because the TypeScript require hook it installs is not something
+ * Jest's module registry honours.
  */
 
 const { execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -111,6 +121,18 @@ function okRow(overrides = {}) {
     msPerAudioSecond: { stem: null, segment: 6.3, embed: 55.7, assemble: 0.1, total: 62.1 },
     ...overrides,
   };
+}
+
+/**
+ * A deep copy of a table's rows, taken BEFORE a carry. `publishedTable` builds
+ * a carried table with `{...previousTable}`, so its `rows` is the SAME ARRAY
+ * the previous baseline holds: `expect(carried.rows).toEqual(previous.rows)`
+ * compares an object with itself and cannot fail — not on the carry logic, and
+ * not on its removal. Everything a carry must preserve is compared against
+ * this snapshot instead.
+ */
+function snapshot(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function skippedRow(overrides = {}) {
@@ -247,6 +269,143 @@ describe('the exit rule', () => {
   });
 });
 
+// -------------------------------------------------------- the drift guard
+
+/**
+ * The bench COPIES constants out of `src/dsp/diarization.ts` — the four the
+ * anchored column is computed from (SEG_SHIFT, FRAME_SHIFT, SEG_FRAMES,
+ * POWERSET) as well as the four policy numbers the baseline publishes. A copy
+ * that drifts does not fail: it silently reports a different metric under the
+ * same column name, and `docs/bench/diarize-bench-baseline.json` then quotes a
+ * policy the shipped DSP no longer runs.
+ *
+ * The guard used to cover the four policy numbers plus `anchorMinShare` — and
+ * that fifth entry compared the bench's own constant to itself, so it could
+ * never fire. It is the bench's METRIC parameter (the sweep's `overlap80`);
+ * the DSP has no counterpart to compare it against, and it is pinned on its
+ * own by the ANCHOR_MIN_SHARE test above.
+ */
+describe('constantDrift', () => {
+  /** The shipped values as they stand today (`src/dsp/diarization.ts:36-90`). */
+  const SHIPPED = Object.freeze({
+    threshold: 0.55,
+    minClusterSize: 4,
+    minSpeakerShare: 0.05,
+    maxSpeakers: 6,
+    segShift: 16000,
+    frameShift: 270,
+    segFrames: 589,
+    powerset: [[], [0], [1], [2], [0, 1], [0, 2], [1, 2]],
+  });
+
+  it('checks every constant the bench copies, and nothing it merely owns', () => {
+    expect(Object.keys(bench.SHIPPED_CONSTANTS).sort()).toEqual([
+      'frameShift',
+      'maxSpeakers',
+      'minClusterSize',
+      'minSpeakerShare',
+      'powerset',
+      'segFrames',
+      'segShift',
+      'threshold',
+    ]);
+    // The bench's own metric parameter is NOT in here: it has no shipped
+    // counterpart, and the entry that pretended otherwise compared it to
+    // itself.
+    expect(bench.SHIPPED_CONSTANTS.anchorMinShare).toBeUndefined();
+    expect(bench.SHIPPED_CONSTANTS).toEqual(SHIPPED);
+  });
+
+  it('is silent when the shipped DSP still holds every copied value', () => {
+    expect(bench.constantDrift(SHIPPED)).toEqual([]);
+  });
+
+  it('names a policy constant that moved one step', () => {
+    expect(bench.constantDrift({ ...SHIPPED, threshold: 0.56 })).toEqual([
+      { key: 'threshold', shipped: 0.56, bench: 0.55 },
+    ]);
+    expect(bench.constantDrift({ ...SHIPPED, minClusterSize: 5 }).map((d) => d.key)).toEqual(['minClusterSize']);
+    expect(bench.constantDrift({ ...SHIPPED, minSpeakerShare: 0.04 }).map((d) => d.key)).toEqual(['minSpeakerShare']);
+    expect(bench.constantDrift({ ...SHIPPED, maxSpeakers: 7 }).map((d) => d.key)).toEqual(['maxSpeakers']);
+  });
+
+  /**
+   * The four the anchored column is made of, each one step off — the drift
+   * nothing caught before. A FRAME_SHIFT of 271 still puts window 1 at global
+   * frame 59 (`trunc(16000/271 + 0.5)`), so the metric's own fixture cannot
+   * see it; only a comparison with the shipped constant can.
+   */
+  it('names a metric constant that moved one step, which no fixture would catch', () => {
+    expect(bench.constantDrift({ ...SHIPPED, frameShift: 271 })).toEqual([
+      { key: 'frameShift', shipped: 271, bench: 270 },
+    ]);
+    expect(bench.constantDrift({ ...SHIPPED, segShift: 16001 }).map((d) => d.key)).toEqual(['segShift']);
+    expect(bench.constantDrift({ ...SHIPPED, segFrames: 588 }).map((d) => d.key)).toEqual(['segFrames']);
+    expect(bench.constantDrift({ ...SHIPPED, segFrames: 590 }).map((d) => d.key)).toEqual(['segFrames']);
+  });
+
+  it('compares the powerset by VALUE, so a reordered row is drift', () => {
+    // The model's class order decides which local speaker a frame belongs to;
+    // swapping the two-speaker rows [0,1] and [0,2] keeps the shape, the
+    // length and every member, and silently relabels overlap frames.
+    const reordered = [[], [0], [1], [2], [0, 2], [0, 1], [1, 2]];
+    expect(bench.constantDrift({ ...SHIPPED, powerset: reordered }).map((d) => d.key)).toEqual(['powerset']);
+    // A constant that disappeared entirely (renamed upstream) is drift too,
+    // not a silently passing `undefined`.
+    expect(bench.constantDrift({ ...SHIPPED, powerset: undefined }).map((d) => d.key)).toEqual(['powerset']);
+    expect(bench.constantDrift({ ...SHIPPED, frameShift: undefined }).map((d) => d.key)).toEqual(['frameShift']);
+  });
+
+  it('reports every drifted constant at once, not just the first', () => {
+    expect(bench.constantDrift({ ...SHIPPED, threshold: 0.6, segFrames: 588 }).map((d) => d.key)).toEqual([
+      'threshold',
+      'segFrames',
+    ]);
+  });
+
+  /**
+   * The guard armed against the DSP that actually ships. It runs in a CHILD
+   * node because `loadDsp` installs a `require.extensions['.ts']` hook, which
+   * Jest's own module registry does not honour — the same reason the bench is
+   * a plain-node script in the first place. No models and no onnxruntime are
+   * touched: this is the TypeScript transpile and the constants only.
+   */
+  it('is armed against the shipped diarization.ts, and finds no drift today', () => {
+    const benchPath = path.join(ROOT, 'scripts', 'diarize-bench.cjs');
+    const code = `require(${JSON.stringify(benchPath)}).loadDsp(); process.stdout.write('drift guard clean');`;
+    const out = execFileSync(process.execPath, ['-e', code], { cwd: ROOT, encoding: 'utf8' });
+    expect(out).toBe('drift guard clean');
+  }, 60000);
+
+  /**
+   * And that it THROWS, not merely computes. The child seeds `require.cache`
+   * for `diarization.ts` with a module whose FRAME_SHIFT is one step off and
+   * everything else on its pin, so the shipped file is READ-ONLY here: the
+   * drift is injected at the module boundary, and the bench must refuse to
+   * measure a single number under it.
+   */
+  it('refuses to measure at all when the shipped DSP has moved', () => {
+    const dspPath = path.join(ROOT, 'src', 'dsp', 'diarization.ts');
+    const benchPath = path.join(ROOT, 'scripts', 'diarize-bench.cjs');
+    const code = `
+      const p = ${JSON.stringify(dspPath)};
+      require.cache[p] = {
+        id: p, filename: p, path: require('node:path').dirname(p), loaded: true, children: [], paths: [],
+        exports: {
+          DIARIZE_THRESHOLD: 0.55, MIN_CLUSTER_SIZE: 4, MIN_SPEAKER_SHARE: 0.05, MAX_SPEAKERS: 6,
+          SEG_SHIFT: 16000, FRAME_SHIFT: 271, SEG_FRAMES: 589,
+          POWERSET: [[], [0], [1], [2], [0, 1], [0, 2], [1, 2]],
+        },
+      };
+      try { require(${JSON.stringify(benchPath)}).loadDsp(); process.stdout.write('NO THROW'); }
+      catch (e) { process.stdout.write(e.message); }
+    `;
+    const out = execFileSync(process.execPath, ['-e', code], { cwd: ROOT, encoding: 'utf8' });
+    expect(out).toContain('frameShift = 271, this bench uses 270');
+    expect(out).toContain('a new bench run, not an edited baseline');
+  }, 60000);
+});
+
 // ---------------------------------------------------------- baseline shape
 
 describe('buildBaseline', () => {
@@ -301,6 +460,24 @@ describe('buildBaseline', () => {
     expect(table.correct).toBe(1);
     expect(table.measured).toBe(1);
     expect(table.skipped).toBe(1);
+  });
+
+  /**
+   * The other half of the stamp rule, and the one no assertion in this file
+   * covered: a table that measured NOTHING carries no machine, because there
+   * is nothing to attribute. Without this, `tableOf`'s
+   * `measured.length > 0 && machine` can be cut down to `machine` — signing an
+   * empty table with the machine of a run that measured none of it — and the
+   * suite stays green while that function's own docblock says otherwise.
+   */
+  it('leaves an unmeasured table unstamped, and an anonymous run stamps nothing', () => {
+    expect('machine' in baseline().tables.fullChain).toBe(false);
+    // The second half of the same condition: no machine info, no stamp, even
+    // on the table this run did measure.
+    const anonymous = baseline({ machine: null });
+    expect('machine' in anonymous.tables.direct).toBe(false);
+    expect(anonymous.tables.direct.measured).toBe(1);
+    expect(anonymous.machine).toBeNull();
   });
 
   it('says why a table did not run instead of leaving an empty one to read as a pass', () => {
@@ -406,6 +583,72 @@ describe('fetch-diarization-assets.cjs', () => {
       'bedf036c *0-four-speakers-zh.wav',
     ]);
     expect(text.endsWith('\n')).toBe(true);
+  });
+
+  /**
+   * MB is DECIMAL here, as it is everywhere else this app shows a person a
+   * model download size: D2 pins the set at 32,523,463 B, D5's model gate
+   * shows "32.5 MB", `diarizeService.ts:608` says "about 32.5 MB, one time",
+   * and `e2e-smoke.cjs` renders every model size as `expectedBytes / 1e6`. A
+   * binary MiB divisor printed "31.0 MB" for the same bytes — the one figure
+   * the operator compares against the app's own line, and the one figure in
+   * this file that disagreed with its own prose ("the 32.5 MB model set").
+   */
+  it('prints download sizes in the decimal MB the plan and the app pin', () => {
+    const { DIARIZE_TOTAL_BYTES, DIARIZE_FILES } = require(path.join(ROOT, 'electron', 'diarizeManager.cjs'));
+    expect(DIARIZE_TOTAL_BYTES).toBe(32523463);
+    expect(fetcher.mb(DIARIZE_TOTAL_BYTES)).toBe('32.5 MB');
+    expect(DIARIZE_FILES.map((f) => fetcher.mb(f.bytes))).toEqual(['6.0 MB', '26.5 MB']);
+    // The largest recording, so the recordings' own lines are pinned too.
+    expect(fetcher.mb(1819586)).toBe('1.8 MB');
+  });
+
+  /**
+   * The sidecar is the ONLY record of what these four files were on the
+   * machine that fetched them: upstream publishes no digest, so the fetcher
+   * pins them by SIZE alone, and a recording swapped for a different file of
+   * the same byte count passes that pin. The record only means something if it
+   * is CHECKED — a run that recomputes it and writes it back over itself turns
+   * the one piece of evidence into a note about whatever is on the disk now.
+   */
+  it('reads a sidecar back as the digests it recorded, comments and all', () => {
+    const text = fetcher.sidecarText([
+      { filename: '1-two-speakers-en.wav', sha256: 'f1c877dc' },
+      { filename: '0-four-speakers-zh.wav', sha256: 'bedf036c' },
+    ]);
+    const recorded = fetcher.parseSidecar(text);
+    expect([...recorded]).toEqual([
+      ['1-two-speakers-en.wav', 'f1c877dc'],
+      ['0-four-speakers-zh.wav', 'bedf036c'],
+    ]);
+    // `sha256sum` writes ` *name` for binary and two spaces for text; both are
+    // its own output, so both read back.
+    expect([...fetcher.parseSidecar(['# a comment', '', 'abc123  2-two-speakers-en.wav', ''].join('\n'))]).toEqual([
+      ['2-two-speakers-en.wav', 'abc123'],
+    ]);
+    expect([...fetcher.parseSidecar('')]).toEqual([]);
+  });
+
+  it('calls a digest that changed under a recorded name a mismatch, and nothing else', () => {
+    const recorded = fetcher.parseSidecar(
+      fetcher.sidecarText([
+        { filename: '1-two-speakers-en.wav', sha256: 'f1c877dc' },
+        { filename: '2-two-speakers-en.wav', sha256: 'ee9c33d3' },
+      ])
+    );
+    expect(
+      fetcher.sidecarMismatches(recorded, [
+        // Same size, different bytes — the swap the size pin cannot see.
+        { filename: '1-two-speakers-en.wav', sha256: '9a3b0f11' },
+        // On its record.
+        { filename: '2-two-speakers-en.wav', sha256: 'ee9c33d3' },
+        // Never recorded: a new file to write down, not a mismatch to fail on.
+        { filename: '3-two-speakers-en.wav', sha256: 'dd3cf234' },
+      ])
+    ).toEqual([{ filename: '1-two-speakers-en.wav', recorded: 'f1c877dc', actual: '9a3b0f11' }]);
+    // A recorded name that is not on this disk is a missing FILE, reported as
+    // such by the size pass — not a digest that disagrees.
+    expect(fetcher.sidecarMismatches(recorded, [])).toEqual([]);
   });
 
   it('resolves the models into the layout getDiarizeModelPaths reads', () => {
@@ -604,6 +847,7 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
       direct: { ran: true, rows: [okRow()] },
       fullChain: { ran: true, rows: [okRow({ file: '3-two-speakers-en.wav', audioSeconds: 54.8 })] },
     });
+    const previousRows = snapshot(previous.tables.fullChain.rows);
     const out = rerun({
       direct: { ran: true, rows: [okRow()] },
       fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
@@ -612,7 +856,7 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
     expect(out.machine).toEqual(MACHINE_FIXTURE);
     expect(out.tables.direct.machine).toEqual(MACHINE_FIXTURE);
     expect(out.tables.fullChain.machine).toEqual(other);
-    expect(out.tables.fullChain.rows).toEqual(previous.tables.fullChain.rows);
+    expect(out.tables.fullChain.rows).toEqual(previousRows);
   });
 
   /**
@@ -636,6 +880,7 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
         rows: [okRow({ file: '3-two-speakers-en.wav', audioSeconds: 54.8, speakerCount: 2 })],
       },
     });
+    const originalRows = snapshot(original.tables.fullChain.rows);
     const carriedOnce = rerun({
       direct: { ran: true, rows: [okRow()] },
       fullChain: { ran: false, rows: [], notRunReason: 'not requested (run with --full-chain)' },
@@ -653,7 +898,15 @@ describe('buildBaseline merges with the baseline it is about to overwrite', () =
     });
     // Byte-identical rows, so the stamp beside them must still be the run that
     // measured them — neither the middle file (09-06) nor this one (09-07).
-    expect(carriedTwice.tables.fullChain.rows).toEqual(original.tables.fullChain.rows);
+    // Against the SNAPSHOT, never against `original.tables.fullChain.rows`:
+    // `publishedTable` spreads the previous table, so the carried table holds
+    // the very same `rows` ARRAY and comparing the two compares an object to
+    // itself — an assertion that passes on any carry logic at all, including
+    // none (task-6-full.md:226).
+    expect(carriedTwice.tables.fullChain.rows).toEqual(originalRows);
+    expect(carriedTwice.tables.fullChain.rows[0].file).toBe('3-two-speakers-en.wav');
+    expect(carriedTwice.tables.fullChain.rows[0].audioSeconds).toBe(54.8);
+    expect(carriedTwice.tables.fullChain.rows[0].ms.segment).toBe(214);
     expect(carriedTwice.tables.fullChain.carriedFrom).toBe('2026-09-05T20:00:00.000Z');
     expect(carriedTwice.tables.fullChain.machine).toEqual(other);
     // The reason is THIS run's — why it published no full chain of its own.
@@ -769,6 +1022,42 @@ describe('the separation clock', () => {
   });
 });
 
+// ------------------------------------------------- the exit rule, at source
+
+/**
+ * The exit code is the only part of a bench a gate reads, and BOTH of its
+ * sides are pinned at the process level further down — over the real host,
+ * which needs the 32.5 MB model set and a recording, both gitignored. On a
+ * machine without them those two tests skip, and nothing else in this file
+ * connects `countMismatches` to what `main` returns: a bench mutated to
+ * `return 1` (fails a correct run) or `return 0` (passes a wrong count) would
+ * leave the suite green there. This reads the wiring out of the source
+ * instead — weaker than running it, and the reason the skip below is loud.
+ */
+describe('the exit rule, as `main` wires it', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'diarize-bench.cjs'), 'utf8');
+  const mainSource = source.slice(
+    source.indexOf('async function main()'),
+    source.indexOf('if (require.main === module)')
+  );
+
+  it('returns 1 only when a --direct count disagrees, and 0 otherwise', () => {
+    expect(mainSource.length).toBeGreaterThan(0);
+    expect(mainSource).toContain('const mismatches = countMismatches(tables.direct.rows);');
+    expect(mainSource).toContain('return mismatches.length > 0 ? 1 : 0;');
+  });
+
+  it('refuses to publish, and fails, before that — when nothing was measured', () => {
+    expect(mainSource).toContain('const empty = unmeasuredFailures(modes, tables);');
+    expect(mainSource).toContain('left as it was');
+    // The refusal comes BEFORE the write, or the file is already overwritten
+    // by the time the run decides it had nothing to publish.
+    expect(mainSource.indexOf('const empty = unmeasuredFailures')).toBeLessThan(
+      mainSource.indexOf('fs.writeFileSync(outPath')
+    );
+  });
+});
+
 // ------------------------------------------- the CLI over the verified models
 
 const REAL_ASSETS = path.join(ROOT, 'test-assets');
@@ -809,6 +1098,25 @@ function linkedAssetsRoot(prefix) {
   }
   fs.mkdirSync(path.join(root, 'diarization'), { recursive: true });
   return root;
+}
+
+/** Every recording the fetcher pins, at its pinned size — what the fetcher's
+ * own gated tests need. */
+const ALL_RECORDINGS_PRESENT = fetcher.RECORDINGS.every(
+  (r) => sizeOrNull(path.join(REAL_ASSETS, 'diarization', r.filename)) === r.bytes
+);
+
+// A skipped exit-rule test must not read as a pinned one. The gated blocks
+// below own the only checks that RUN these processes end to end, so a machine
+// without the gitignored assets says so out loud rather than printing a green
+// count that means less than it looks.
+if (!MODELS_PRESENT || !RECORDING_PRESENT || !ALL_RECORDINGS_PRESENT) {
+  console.warn(
+    'diarize-bench.test: the process-level exit rule and the sidecar refusal are NOT pinned ' +
+      `on this machine (models ${MODELS_PRESENT ? 'present' : 'ABSENT'}, ` +
+      `recordings ${ALL_RECORDINGS_PRESENT ? 'present' : 'ABSENT'}). ` +
+      'Run `node scripts/fetch-diarization-assets.cjs` to arm them.'
+  );
 }
 
 (MODELS_PRESENT ? describe : describe.skip)('the CLI with the model set verified', () => {
@@ -896,6 +1204,78 @@ function linkedAssetsRoot(prefix) {
   );
 });
 
+// ------------------------------- the fetcher over the verified assets (real)
+
+(MODELS_PRESENT && ALL_RECORDINGS_PRESENT ? describe : describe.skip)(
+  'the fetcher CLI over assets that are all present',
+  () => {
+    const roots = [];
+
+    afterAll(() => {
+      for (const r of roots) fs.rmSync(r, { recursive: true, force: true });
+    });
+
+    /** A scratch root with the models AND all four recordings hard-linked in,
+     * so a full (non-`--verify`) run has nothing to download. */
+    function linkedFullRoot(prefix) {
+      const root = linkedAssetsRoot(prefix);
+      roots.push(root);
+      for (const r of fetcher.RECORDINGS) {
+        fs.linkSync(path.join(REAL_ASSETS, 'diarization', r.filename), path.join(root, 'diarization', r.filename));
+      }
+      return root;
+    }
+
+    it('records the digests of a first fetch, and re-runs over them unchanged', () => {
+      const root = linkedFullRoot('fetch-first-');
+      const sidecar = path.join(root, 'diarization', fetcher.SIDECAR_NAME);
+      expect(fs.existsSync(sidecar)).toBe(false);
+
+      const first = runScript('fetch-diarization-assets.cjs', [`--assets=${root}`]);
+      expect(first.code).toBe(0);
+      expect(first.stdout).toContain('this run writes the first record');
+      const written = fs.readFileSync(sidecar, 'utf8');
+      const recorded = fetcher.parseSidecar(written);
+      expect([...recorded.keys()]).toEqual(fetcher.RECORDINGS.map((r) => r.filename));
+      for (const r of fetcher.RECORDINGS) {
+        const bytes = fs.readFileSync(path.join(root, 'diarization', r.filename));
+        expect(recorded.get(r.filename)).toBe(crypto.createHash('sha256').update(bytes).digest('hex'));
+      }
+
+      // The second run has the same files and the same record: it checks them
+      // and leaves the record alone.
+      const second = runScript('fetch-diarization-assets.cjs', [`--assets=${root}`]);
+      expect(second.code).toBe(0);
+      expect(second.stdout).toContain('sha256 matches SHA256SUMS.txt');
+      expect(second.stdout).not.toContain('MISMATCH');
+      expect(fs.readFileSync(sidecar, 'utf8')).toBe(written);
+    }, 120000);
+
+    it('refuses to overwrite a recorded digest it disagrees with', () => {
+      const root = linkedFullRoot('fetch-mismatch-');
+      const sidecar = path.join(root, 'diarization', fetcher.SIDECAR_NAME);
+      // One recorded digest, and it is not this file's: the sherpa recording's
+      // own digest with its last character moved on. Everything else is
+      // unrecorded, i.e. a new row rather than a disagreement.
+      const before = fetcher.sidecarText([
+        {
+          filename: '1-two-speakers-en.wav',
+          sha256: 'f1c877dc01595e28be7147bf2fe38e5268147a868bf3fdb5c37b97f5940e21f4',
+        },
+      ]);
+      fs.writeFileSync(sidecar, before);
+
+      const res = runScript('fetch-diarization-assets.cjs', [`--assets=${root}`]);
+      expect(res.code).toBe(1);
+      expect(res.stdout).toContain('MISMATCH 1-two-speakers-en.wav');
+      expect(res.stderr).toContain('left as it is');
+      // The record of what was fetched is the only copy there is, so a run
+      // that disagrees with it reports and stops instead of replacing it.
+      expect(fs.readFileSync(sidecar, 'utf8')).toBe(before);
+    }, 120000);
+  }
+);
+
 // ---------------------------------------------------------- the fetcher CLI
 
 describe('the fetcher CLI', () => {
@@ -913,6 +1293,8 @@ describe('the fetcher CLI', () => {
     const res = runScript('fetch-diarization-assets.cjs', [`--assets=${tmp}`, '--verify']);
     expect(res.code).toBe(1);
     expect(res.stdout).toContain('MISSING');
+    // The header the operator reads against the app's "about 32.5 MB" line.
+    expect(res.stdout).toContain('models (32.5 MB total)');
     expect(res.stdout).toContain('6 asset(s) missing or off their pin');
     expect(fs.readdirSync(tmp)).toEqual([]);
   }, 60000);
@@ -925,6 +1307,68 @@ describe('the fetcher CLI', () => {
     const res = runScript('fetch-diarization-assets.cjs', ['--assets=', '--verify']);
     expect(res.code).toBe(2);
     expect(res.stderr).toContain('--assets needs a value');
+  }, 60000);
+
+  /**
+   * The swap the SIZE pin cannot see: same byte count, different bytes. Only
+   * the recorded digest can tell, so `--verify` reads it — before this it
+   * returned "present" for the impostor and the next fetch run overwrote the
+   * record of the file it replaced.
+   */
+  it('checks a present recording against the digest SHA256SUMS.txt records', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diarize-sidecar-'));
+    try {
+      const dir = path.join(root, 'diarization');
+      fs.mkdirSync(dir, { recursive: true });
+      // 512,044 bytes — 1-two-speakers-en.wav's pinned size exactly, so the
+      // size pass calls it present.
+      const impostor = Buffer.alloc(512044, 7);
+      fs.writeFileSync(path.join(dir, '1-two-speakers-en.wav'), impostor);
+      const actual = require('node:crypto').createHash('sha256').update(impostor).digest('hex');
+      const recorded = 'f1c877dc01595e28be7147bf2fe38e5268147a868bf3fdb5c37b97f5940e21f3';
+      expect(actual).not.toBe(recorded);
+      fs.writeFileSync(
+        path.join(dir, 'SHA256SUMS.txt'),
+        fetcher.sidecarText([{ filename: '1-two-speakers-en.wav', sha256: recorded }])
+      );
+
+      const res = runScript('fetch-diarization-assets.cjs', [`--assets=${root}`, '--verify']);
+      expect(res.code).toBe(1);
+      expect(res.stdout).toContain('MISMATCH');
+      expect(res.stdout).toContain(`SHA256SUMS.txt records ${recorded}`);
+      expect(res.stdout).toContain(actual);
+      // And it is COUNTED: 2 models + 3 absent recordings + this one.
+      expect(res.stdout).toContain('6 asset(s) missing or off their pin');
+      // Read-only means read-only, even on a mismatch.
+      expect(fs.readFileSync(path.join(dir, 'SHA256SUMS.txt'), 'utf8')).toContain(recorded);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  it('says the digest matched when the file on disk is the one recorded', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diarize-sidecar-ok-'));
+    try {
+      const dir = path.join(root, 'diarization');
+      fs.mkdirSync(dir, { recursive: true });
+      const bytes = Buffer.alloc(512044, 7);
+      fs.writeFileSync(path.join(dir, '1-two-speakers-en.wav'), bytes);
+      const actual = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+      fs.writeFileSync(
+        path.join(dir, 'SHA256SUMS.txt'),
+        fetcher.sidecarText([{ filename: '1-two-speakers-en.wav', sha256: actual }])
+      );
+
+      const res = runScript('fetch-diarization-assets.cjs', [`--assets=${root}`, '--verify']);
+      expect(res.stdout).not.toContain('MISMATCH');
+      expect(res.stdout).toContain('sha256 matches SHA256SUMS.txt');
+      // The three absent recordings and the two models are still missing, so
+      // the run still fails — the digest check adds nothing to that tally.
+      expect(res.code).toBe(1);
+      expect(res.stdout).toContain('5 asset(s) missing or off their pin');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }, 60000);
 
   it('refuses --verify=true instead of turning the read-only check into a fetch', () => {
