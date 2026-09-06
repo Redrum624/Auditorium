@@ -1533,9 +1533,25 @@ function channelsPeak(channels: readonly Float32Array[]): number {
  * fixture reaches the same peak in the head, in the gaps and in the tail, so
  * whichever one is scanned produces the expected number. The test therefore
  * isolates them — one span set per region, each leaving only that region
- * uncovered — and the GAPS are the region the shipped hook rests on, since it
- * measures speaker k against speaker k's OWN turns and the silence between
- * those turns is the whole of the mask evidence.
+ * uncovered — and the shipped hook rests on ALL THREE, since it measures
+ * speaker k against speaker k's OWN turns: what lies outside is the head
+ * before that speaker's first turn, the gaps between its turns, and the tail
+ * after its last. The two voices of the fixture those tests run on
+ * (`testHooks.test.ts`, `addSpeakerDoc`) divide that between them — speaker 1
+ * takes two turns and the second reaches the document's end, so its evidence
+ * is head + gap and an EMPTY tail; speaker 2 takes a single turn, so it has no
+ * gap at all and its whole evidence is head + tail.
+ *
+ * Spans may arrive in any ORDER and may NEST — the sort and the monotonic
+ * cursor answer both, and both are pinned. They must lie WITHIN the channels:
+ * the head scan runs to the span's own start, so a span past the last sample
+ * would cost the span rather than the channel. Every caller satisfies that by
+ * construction — `segmentsToDocSamples` clamps both edges to the document
+ * length, and that document is the one that was landed. (A clamp against
+ * `ch.length` used to stand in the scan; it could not change the answer, since
+ * a read past a Float32Array is `undefined` and `Math.abs` of that is NaN,
+ * which never beats the running peak. An unpinnable line is a line that says
+ * nothing, so the guarantee is stated here instead.)
  */
 export function peakOutsideSpans(
   channels: readonly Float32Array[],
@@ -1546,7 +1562,7 @@ export function peakOutsideSpans(
   for (const ch of channels) {
     let cursor = 0;
     for (const s of ordered) {
-      const stop = Math.min(s.startSample, ch.length);
+      const stop = s.startSample;
       for (let i = cursor; i < stop; i++) {
         const v = Math.abs(ch[i]);
         if (v > outside) outside = v;

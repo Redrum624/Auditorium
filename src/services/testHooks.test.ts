@@ -46,16 +46,20 @@ import {
 } from '../multitrack/sessionViewport';
 import {
   assembleDiarization,
+  assembledFrameCount,
+  expectedWindowCount,
+  frameToSample16k,
   segmentsToDocSamples,
   FRAME_SHIFT,
   MIN_CLUSTER_SIZE,
   MIN_EMBED_FRAMES,
+  MODEL_SAMPLE_RATE,
   SEG_FRAMES,
   SEG_SHIFT,
   SEG_WINDOW,
 } from '../dsp/diarization';
 import * as spanMask from '../dsp/spanMask';
-import { cancelDiarization } from './diarizeService';
+import { cancelDiarization, modelLength16k } from './diarizeService';
 import {
   classWindow,
   installDiarizeBackend,
@@ -1390,22 +1394,82 @@ describe('separateSpeakersLand (D4/D6)', () => {
    *  channel, and on a fixture where channel 0 dominates, a loop that never
    *  left channel 0 would produce the same numbers. With the peak living on
    *  channel 1, every expectation below is derived from a sample the
-   *  measurement can only reach by scanning both. */
-  function addSpeakerDoc(name = 'talk.wav', samples = 2 * 44100, channelCount = 2): AudioDocument {
+   *  measurement can only reach by scanning both.
+   *
+   *  `rate` is a parameter and not the constant for the same reason: the hook
+   *  hands the ACTIVE document's rate to both halves of the chain, and at
+   *  44.1 kHz a hardcoded 44100 in either of them is the identity. One fixture
+   *  below is 48 kHz so that neither can be. */
+  function addSpeakerDoc(
+    name = 'talk.wav',
+    samples = 2 * 44100,
+    channelCount = 2,
+    rate = 44100
+  ): AudioDocument {
     const channels: Float32Array[] = [];
     for (let c = 0; c < channelCount; c++) {
       const ch = new Float32Array(samples);
       for (let i = 0; i < ch.length; i++) {
         ch[i] =
-          (0.4 + 0.06 * c) * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) +
+          (0.4 + 0.06 * c) * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / rate) +
           (c === 0 ? 0.05 : -0.03);
       }
       channels.push(ch);
     }
-    const doc = createDocument({ name, sampleRate: 44100, channels });
+    const doc = createDocument({ name, sampleRate: rate, channels });
     useAppStore.getState().addDocument(doc);
     return doc;
   }
+
+  /** Frames `syntheticSpeakerEvidence` assembles for a document of
+   *  `docLengthSamples` at `rate`: the service's own resampled length, through
+   *  the assembly's own window and cut arithmetic. Not a written-down number —
+   *  it is the quantity the two derivations below stand on. */
+  const fixtureFrameCount = (docLengthSamples: number, rate: number): number => {
+    const samples16k = modelLength16k(docLengthSamples, rate);
+    return assembledFrameCount(samples16k, expectedWindowCount(samples16k));
+  };
+
+  /** Seconds of assembled speech the fixture's timeline hands each voice.
+   *
+   *  `syntheticSpeakerEvidence` alternates the two voices every
+   *  HOOK_TURN_FRAMES frames, and every fixture in this describe is between
+   *  two and three turns long: voice 0 holds [0, T) and [2T, frames), voice 1
+   *  holds [T, 2T). The assembly closes an open final run at frame
+   *  `frames - 1` rather than one past it (`diarization.ts`), so voice 0's
+   *  tail is `frames - 1 - 2T` frames, and a frame is FRAME_SHIFT samples at
+   *  MODEL_SAMPLE_RATE. The two numbers therefore DIFFER, which is what a
+   *  summary reporting a constant array cannot produce. */
+  const expectedSpeechSeconds = (docLengthSamples: number, rate: number): [number, number] => {
+    const frames = fixtureFrameCount(docLengthSamples, rate);
+    const tailFrames = frames - 1 - 2 * HOOK_TURN_FRAMES;
+    return [
+      ((HOOK_TURN_FRAMES + tailFrames) * FRAME_SHIFT) / MODEL_SAMPLE_RATE,
+      (HOOK_TURN_FRAMES * FRAME_SHIFT) / MODEL_SAMPLE_RATE,
+    ];
+  };
+
+  /** The same timeline as document samples, per voice: the frame's 16 kHz
+   *  centre carried to the document's own clock and clamped to it, exactly as
+   *  `segmentsToDocSamples` maps it — but from the FRAMES, so the spans a
+   *  landing was masked with can be checked against a rate this file supplied
+   *  rather than against a second call at whatever rate the hook happened to
+   *  pass. */
+  const expectedTurnSpans = (
+    docLengthSamples: number,
+    rate: number
+  ): { startSample: number; endSample: number }[][] => {
+    const frames = fixtureFrameCount(docLengthSamples, rate);
+    const at = (frame: number): number =>
+      Math.min(docLengthSamples, Math.round((frameToSample16k(frame) * rate) / MODEL_SAMPLE_RATE));
+    return [
+      [
+        { startSample: at(0), endSample: at(HOOK_TURN_FRAMES) },
+        { startSample: at(2 * HOOK_TURN_FRAMES), endSample: at(frames - 1) },
+      ],
+      [{ startSample: at(HOOK_TURN_FRAMES), endSample: at(2 * HOOK_TURN_FRAMES) }],
+    ];
+  };
 
   it('lands Speaker 1, Speaker 2 and Backing at a forced count of two', () => {
     const t = api();
@@ -1427,6 +1491,13 @@ describe('separateSpeakersLand (D4/D6)', () => {
     expect(summary.lengthSamples).toBe(2 * 44100);
     expect(useSessionStore.getState().session.tracks).toHaveLength(3);
     expect(useAppStore.getState().view).toBe('multitrack');
+    // The routing flag on the side the mono test cannot reach: asserted only
+    // as `true` on a mono source it is the seed value of a field hardcoded to
+    // `true`, and a stereo landing that claimed dual-mono routing would look
+    // exactly like this one. Two channels in, two channels out on all three
+    // documents, and the flag says so.
+    expect(summary.monoRoutedAsDualMono).toBe(false);
+    expect(summary.channelCounts).toEqual([2, 2, 2]);
     // D4: a speaker split is not a partition of the source, so the landing
     // makes no exact-sum claim in either direction.
     expect(summary.exactSumHolds).toBeNull();
@@ -1450,7 +1521,9 @@ describe('separateSpeakersLand (D4/D6)', () => {
     // `toBeNull()` above is a contrast and not the seed value: `landVoice`
     // reports the real peak-derived verdict (`createLandingDocuments`:
     // `sourcePeak <= 1`), and the synthetic separation is an exact partition of
-    // a source that peaks near 0.45.
+    // a source whose own peak — channel 1's trough, just under 0.49, since that
+    // channel carries the larger amplitude AND the offset that deepens it
+    // (`addSpeakerDoc`) — sits well inside full scale.
     expect(summary.exactSumHolds).toBe(true);
   });
 
@@ -1481,8 +1554,16 @@ describe('separateSpeakersLand (D4/D6)', () => {
     // Turns, not one span each: the fixture alternates, so the first speaker
     // gets two turns and the second one.
     expect(summary.segmentCounts).toEqual([2, 1]);
+    // Seconds, not signs. "> 0" is satisfied by any constant array, including
+    // the one an unwired field would carry; these two numbers come off the
+    // timeline the fixture is BUILT from (HOOK_TURN_FRAMES, FRAME_SHIFT,
+    // MODEL_SAMPLE_RATE) and they differ from each other, because the first
+    // voice holds two turns and the second one.
+    const [firstVoice, secondVoice] = expectedSpeechSeconds(2 * 44100, 44100);
+    expect(secondVoice).toBeLessThan(firstVoice);
     expect(summary.speechSeconds).toHaveLength(2);
-    for (const s of summary.speechSeconds) expect(s).toBeGreaterThan(0);
+    expect(summary.speechSeconds[0]).toBeCloseTo(firstVoice, 9);
+    expect(summary.speechSeconds[1]).toBeCloseTo(secondVoice, 9);
   });
 
   it('measures what is outside the turns rather than reporting a zero of its own', () => {
@@ -1522,13 +1603,17 @@ describe('separateSpeakersLand (D4/D6)', () => {
     t.separateSpeakersLand(2);
 
     // Three regions lie outside a span set — the head, the gaps and the tail —
-    // and the shipped hook leans on the GAPS: it measures speaker k against
-    // speaker k's OWN turns, where the gaps between those turns are the only
-    // place the reported 0 proves anything. Handed one span set they are
-    // interchangeable (this fixture reaches the same peak in each), so each is
-    // isolated here by a span set that leaves only that one region uncovered.
-    // A measurement that dropped two of the three would still answer the test
-    // above; it cannot answer all four of these.
+    // and the shipped hook leans on ALL THREE: it measures speaker k against
+    // speaker k's OWN turns, so the places that have to read 0 are the head
+    // before that speaker's first turn, the gaps between its turns and the tail
+    // after its last. The two voices of this fixture divide that between them:
+    // speaker 1 has two turns and the second reaches the document's end, so it
+    // brings head + gap and an EMPTY tail; speaker 2 has one turn and therefore
+    // no gap at all, so its whole evidence is head + tail. Handed one span set
+    // the three are interchangeable (this fixture reaches the same peak in
+    // each), so each is isolated here by a span set that leaves only that one
+    // region uncovered. A measurement that dropped two of the three would still
+    // answer the test above; it cannot answer all four of these.
     const spans = segmentsToDocSamples(
       assembleDiarization(syntheticSpeakerEvidence(length, 44100), { speakerCount: 2 }),
       44100,
@@ -1573,6 +1658,104 @@ describe('separateSpeakersLand (D4/D6)', () => {
     expect(
       peakOutsideSpans(speaker1!.channels, [{ startSample: 0, endSample: length }])
     ).toBe(0);
+  });
+
+  it('answers for span sets the shipped caller never sends: unsorted, nested, and at the last sample', () => {
+    // `peakOutsideSpans` promises head/gaps/tail for the span set it is HANDED,
+    // and two of the lines that make that true for an arbitrary set are
+    // unreachable from `separateSpeakersLand` — `segmentsToDocSamples` always
+    // hands it spans already sorted, disjoint and clamped to the document. They
+    // are pinned here instead, each on a fixture whose LOUD sample lies INSIDE a
+    // span, so the mutant reports that sample and the real code the quieter one
+    // outside it.
+
+    // UNSORTED, the later span first. Without the sort the scan runs [0, 20),
+    // which swallows the 0.9 that {0, 10} covers.
+    const unsorted = new Float32Array(40);
+    unsorted[5] = 0.9; // inside {0, 10}
+    unsorted[15] = 0.3; // the one gap — the answer
+    unsorted[25] = 0.8; // inside {20, 30}
+    unsorted[35] = 0.2; // the tail
+    expect(
+      peakOutsideSpans(
+        [unsorted],
+        [
+          { startSample: 20, endSample: 30 },
+          { startSample: 0, endSample: 10 },
+        ]
+      )
+    ).toBeCloseTo(0.3, 6);
+
+    // NESTED: {10, 20} sits inside {0, 100}, so a cursor that took every span's
+    // end unconditionally would walk BACK to 20 and re-read [20, 100) — which
+    // is covered — as though it were the tail.
+    const nested = new Float32Array(120);
+    nested[50] = 0.7; // inside {0, 100}
+    nested[110] = 0.25; // the tail — the answer
+    expect(
+      peakOutsideSpans(
+        [nested],
+        [
+          { startSample: 0, endSample: 100 },
+          { startSample: 10, endSample: 20 },
+        ]
+      )
+    ).toBeCloseTo(0.25, 6);
+
+    // The tail's own boundary, at the value and one step past it: a span ending
+    // at the LAST sample leaves that sample outside, and one ending at
+    // `ch.length` covers it.
+    const edge = new Float32Array(40);
+    edge[39] = 0.6;
+    expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 39 }])).toBeCloseTo(0.6, 6);
+    expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 40 }])).toBe(0);
+  });
+
+  it('reads the ACTIVE documents rate on both sides of the chain — a 48 kHz source', () => {
+    const t = api();
+    // Every other fixture here is 44.1 kHz, and the hook hands the active
+    // document's rate to BOTH halves of the chain: to `syntheticSpeakerEvidence`
+    // (which resamples the length to 16 kHz) and to `segmentsToDocSamples`
+    // (which carries the assembled spans back to the document's clock). At
+    // 44.1 kHz a hardcoded 44100 in either call is the identity. This source is
+    // 48 kHz, so neither can be.
+    const rate = 48000;
+    const length = 2 * rate;
+    const source = addSpeakerDoc('talk48.wav', length, 2, rate);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(summary.sampleRate).toBe(rate);
+    expect(summary.lengthSamples).toBe(length);
+    expect(summary.segmentCounts).toEqual([2, 1]);
+    // The evidence side. The seconds each voice speaks are fixed by the
+    // TIMELINE, not by the document rate — but the frame count that timeline
+    // runs over comes from the 16 kHz length, which is what a hardcoded 44100
+    // would get wrong here (34,830 samples rather than 32,000, so the first
+    // voice's closing turn ends at a different frame).
+    const [firstVoice, secondVoice] = expectedSpeechSeconds(length, rate);
+    expect(summary.speechSeconds[0]).toBeCloseTo(firstVoice, 9);
+    expect(summary.speechSeconds[1]).toBeCloseTo(secondVoice, 9);
+
+    // The mapping side. The mask has to have kept THESE document samples, so a
+    // mapping computed at 44100 — every edge 8.1 % early and short — leaves
+    // audio outside them on both documents.
+    const [turnsOfOne, turnsOfTwo] = expectedTurnSpans(length, rate);
+    const docs = useAppStore.getState().documents;
+    const speaker1 = docs.find((d) => d.name === 'talk48.wav — Speaker 1');
+    const speaker2 = docs.find((d) => d.name === 'talk48.wav — Speaker 2');
+    expect(speaker1).toBeDefined();
+    expect(speaker2).toBeDefined();
+    expect(peakOutsideSpans(speaker1!.channels, turnsOfOne)).toBe(0);
+    expect(peakOutsideSpans(speaker2!.channels, turnsOfTwo)).toBe(0);
+    // ...and the other voice's turns are audio for this one, so the same
+    // measurement over the other span set has to report the stem's peak: the
+    // two 0s above are silence, not an empty scan.
+    expect(peakOutsideSpans(speaker1!.channels, turnsOfTwo)).toBeCloseTo(
+      Math.fround(VOCALS_WEIGHT * peakOf(source.channels)),
+      6
+    );
+    expect(summary.outsideSpansPeak).toBe(0);
   });
 
   it('reports the audio a mask leaves behind, which is what makes that 0 evidence', () => {
