@@ -635,15 +635,30 @@ function checkEvidence(evidence: DiarizationEvidence): void {
  * cluster. `labels[k]` is the cluster of `evidence.embeddings[k]`, numbered
  * 0..clusterCount−1 (first appearance).
  *
- * Vote: for each frame, each window covering it adds ONE vote to every
- * cluster one of its embedded local speakers is active for (the reference's
- * `relabels[i, j, t] = 1` is 0/1 per window, however many locals share the
- * cluster). The top `speakers_per_frame` clusters by vote (ties on the lower
- * id) are active. A frame the segmentation calls speech but no embedded
- * fragment covers has an all-zero vote and, exactly as in the reference's
- * `argsort`, lands on the lowest cluster id — kept verbatim because the sweep
- * scored this assembly; it only concerns runs under MIN_EMBED_FRAMES in every
- * window that sees them.
+ * Vote: ONE vote per (window, LOCAL SLOT, frame) — `diarcore.cjs`'s
+ * `finalAssignment` (`count[(start+f)·numClusters+t] += 1`), so a cluster two
+ * slots of one window both hear at a frame scores TWO there, as does a cluster
+ * two different windows hear at the same global frame.
+ *
+ * DECLARED DEVIATION from the Python reference: its `relabels[i, j, t] = 1`
+ * saturates a chunk's contribution at 1 however many of that chunk's local
+ * slots share cluster t. `diarcore.cjs` does not, and diarcore is the assembly
+ * `sweep.cjs` scored — DIARIZE_THRESHOLD, MIN_CLUSTER_SIZE and
+ * MIN_SPEAKER_SHARE were every one of them measured through it (design-notes
+ * "Sweep result"), so saturating here would leave those three constants
+ * scored against a different assembly, and re-deriving them is a new bench
+ * run, not an edit. The two rules pick different speakers whenever two slots
+ * of one window land in one cluster and overlap in time — reachable because
+ * `foldSmallClusters` and the share floor's Ward refit both merge clusters
+ * across a window's slots, and because the powerset exists to express two
+ * slots active at once.
+ *
+ * The top `speakers_per_frame` clusters by vote (ties on the lower id) are
+ * active. A frame the segmentation calls speech but no embedded fragment
+ * covers has an all-zero vote and, exactly as in the reference's `argsort`,
+ * lands on the lowest cluster id — kept verbatim because the sweep scored
+ * this assembly; it only concerns runs under MIN_EMBED_FRAMES in every window
+ * that sees them.
  */
 function assembleLabels(evidence: DiarizationEvidence, labels: readonly number[]): AssembledLabels {
   const { windows, embeddings } = evidence;
@@ -658,33 +673,16 @@ function assembleLabels(evidence: DiarizationEvidence, labels: readonly number[]
   });
 
   const votes = new Float64Array(frameCount * clusterCount);
-  /**
-   * Last global frame this window voted each cluster for, so several local
-   * slots of ONE window sharing a cluster cast ONE vote — the reference's
-   * `relabels[i, j, t] = 1` is 0/1 within chunk i and only the finished chunk
-   * is added to the running count.
-   *
-   * CLEARED PER WINDOW, and that is the whole point: the saturation is per
-   * window, never across windows. Carried over, window i+1 skips whichever
-   * frame window i stamped last — so a cluster two windows both hear at the
-   * same global frame scores 1 instead of 2, which flips the argsort below and
-   * can cost it a whole segment (a run one frame short of MIN_ON_S is dropped).
-   * Reused rather than reallocated: at the 2 h cap this loop runs over 7,000
-   * windows.
-   */
-  const stamp = new Int32Array(clusterCount);
   for (let i = 0; i < windows.length; i++) {
     const classes = windows[i];
     const start = windowStartFrame(i);
     const slots = slotCluster[i];
-    stamp.fill(-1);
     for (let f = 0; f < SEG_FRAMES; f++) {
       const g = start + f;
       if (g >= frameCount) break;
       for (const local of POWERSET[classes[f]]) {
         const t = slots[local];
-        if (t < 0 || stamp[t] === g) continue;
-        stamp[t] = g;
+        if (t < 0) continue;
         votes[g * clusterCount + t] += 1;
       }
     }
@@ -719,8 +717,15 @@ function assembleLabels(evidence: DiarizationEvidence, labels: readonly number[]
           isActive = true;
         }
       }
-      // the reference closes an open run at the LAST frame, not one past it
-      if (isActive && start < frameCount - 1) raw.push({ start: frameToSample16k(start), end: frameToSample16k(frameCount - 1) });
+      // Both references close an open run at the LAST frame, not one past it,
+      // and push it even when the run IS that frame (reference:468-474
+      // `if is_active`, diarcore.cjs:326) — the degenerate span exists so
+      // `min_duration_off` can pull it into the turn before it, which is how a
+      // speaker's final turn keeps its last frames instead of ending up to
+      // MIN_OFF_S early. Standing alone it is zero length and MIN_ON_S drops
+      // it. (The F−1 rule with the emptiness guard belongs to
+      // `localSpeakerSpans`, where `copyRun(start, k − 1)` really is empty.)
+      if (isActive) raw.push({ start: frameToSample16k(start), end: frameToSample16k(frameCount - 1) });
     }
     spans.push(mergeAndFilterSpans16k(raw));
   }

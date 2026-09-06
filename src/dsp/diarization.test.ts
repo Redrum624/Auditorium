@@ -848,6 +848,42 @@ describe('assembleDiarization', () => {
     expect(floored.labels).toEqual(pre);
   });
 
+  it('MIN_SPEAKER_SHARE boundary: a cluster at exactly 5 % stays, one frame under it refits', () => {
+    // 190 + 190 + 20 assembled frames — C holds 20/400, which IS
+    // MIN_SPEAKER_SHARE, so the `>=` in the floor keeps it and nothing refits.
+    const C = axis(dim, 2);
+    const labelsOf = (ev: DiarizationEvidence): number[] =>
+      ev.embeddings.map((e) => (cosineDistance(e.vector, A) < 0.01 ? 0 : cosineDistance(e.vector, B) < 0.01 ? 1 : 2));
+    const atFloor = evidenceFromTimeline(FOUR_WINDOWS, [
+      { direction: A, spans: [[10, 200]] },
+      { direction: B, spans: [[250, 440]] },
+      { direction: C, spans: [[500, 520]] },
+    ]);
+    const atFloorLabels = labelsOf(atFloor);
+    expect(atFloorLabels.filter((l) => l === 2)).toHaveLength(4);
+    const kept = applyShareFloor(atFloor, atFloorLabels);
+    expect(kept.refit).toBe(false);
+    expect(kept.labels).toEqual(atFloorLabels);
+    expect(kept.spans[2]).toEqual([{ start: f16(500), end: f16(520) }]);
+    const total = kept.speechSeconds.reduce((a, b) => a + b, 0);
+    expect(kept.speechSeconds[2] / total).toBe(MIN_SPEAKER_SHARE);
+
+    // one frame fewer — 19/399 = 4.76 % — and the floor refits at k = 2
+    const under = evidenceFromTimeline(FOUR_WINDOWS, [
+      { direction: A, spans: [[10, 200]] },
+      { direction: B, spans: [[250, 440]] },
+      { direction: C, spans: [[500, 519]] },
+    ]);
+    const underLabels = labelsOf(under);
+    const first = applyShareFloor(under, underLabels);
+    const underTotal = 399 * FRAME_S;
+    expect((19 * FRAME_S) / underTotal).toBeLessThan(MIN_SPEAKER_SHARE);
+    expect(first.refit).toBe(true);
+    expect(new Set(first.labels).size).toBe(2);
+    // the dropped cluster's speech is re-assigned, never lost
+    expect(first.speechSeconds.reduce((a, b) => a + b, 0)).toBeCloseTo(underTotal, 9);
+  });
+
   it('preFoldClusterCount vs rawClusterCount: a 3-fragment voice folds away', () => {
     // C at frames 600..640 is covered by windows 1, 2, 3 only → 3 fragments < 4.
     const C = axis(dim, 2);
@@ -894,6 +930,38 @@ describe('assembleDiarization', () => {
     const d = assembleDiarization(ev, { speakerCount: 2 });
     expect(segmentsOf(d, 1)).toEqual([{ start: f16(600), end: f16(680) }]);
     expect(assembledFrameCount(total, 3)).toBe(681);
+  });
+
+  it('a run that starts ON the last assembled frame is emitted, and merges into the turn before it', () => {
+    // Both references close an open run at the last frame WITHOUT checking
+    // that the run is longer than one frame (reference:468-474 `if is_active`,
+    // diarcore.cjs:326), and the degenerate span is pushed BEFORE
+    // min_duration_off — so it extends the previous segment instead of
+    // dropping the speaker's last turn. 184,000 samples → frames 0..680; the
+    // lone frame 680 sits 29 frames (7,830 samples ≤ MIN_OFF_S) after the run
+    // that ends at 651.
+    const total = SEG_WINDOW + SEG_SHIFT + 8000;
+    expect(assembledFrameCount(total, 3)).toBe(681);
+    const near = assembleDiarization(
+      evidenceFromTimeline(total, [
+        { direction: A, spans: [[20, 250]] },
+        { direction: B, spans: [[600, 651], [680, 681]] },
+      ]),
+      { speakerCount: 2 }
+    );
+    expect(segmentsOf(near, 1)).toEqual([{ start: f16(600), end: f16(680) }]);
+    // one frame further out (30 frames, 8,100 samples > MIN_OFF_S) nothing
+    // merges and MIN_ON_S drops the zero-length span, as in both references
+    const far = assembleDiarization(
+      evidenceFromTimeline(total, [
+        { direction: A, spans: [[20, 250]] },
+        { direction: B, spans: [[600, 650], [680, 681]] },
+      ]),
+      { speakerCount: 2 }
+    );
+    expect(segmentsOf(far, 1)).toEqual([{ start: f16(600), end: f16(650) }]);
+    expect((680 - 651) * FRAME_SHIFT).toBeLessThanOrEqual(MIN_OFF_S * MODEL_SAMPLE_RATE);
+    expect((680 - 650) * FRAME_SHIFT).toBeGreaterThan(MIN_OFF_S * MODEL_SAMPLE_RATE);
   });
 
   it('segments are sorted by start and speakers numbered by first appearance', () => {
@@ -993,6 +1061,77 @@ describe('the per-frame vote across a window boundary', () => {
     const t = d.segments.find((s) => s.startSample16k === f16(42));
     expect(t).toEqual({ startSample16k: f16(42), endSample16k: f16(60), speaker: expect.any(Number) });
     expect(d.speechSeconds[(t as DiarizationSegment).speaker]).toBeCloseTo((18 * FRAME_SHIFT) / MODEL_SAMPLE_RATE, 9);
+  });
+});
+
+// -------------------------------------------------- the vote inside a window
+
+/**
+ * The vote is NOT saturated per window. `diarcore.cjs`'s `finalAssignment`
+ * adds one vote per (window, LOCAL SLOT, frame) — `count[(start+f)·nc+t] += 1`
+ * with no stamp — so two slots of ONE window that clustered together score
+ * TWO at a frame they share. That is the assembly `sweep.cjs` scored, which is
+ * why DIARIZE_THRESHOLD / MIN_CLUSTER_SIZE / MIN_SPEAKER_SHARE hold; the
+ * Python reference's `relabels[i, j, t] = 1` is the declared deviation.
+ *
+ * Two windows, 176,000 samples, frames 0..651:
+ *   window 0 hears its slots 0 AND 1 over frames 100..199 (class 4) — both
+ *            clustered into T — plus slot 0 alone over 250..349;
+ *   window 1 hears its slots 0 and 1 over the same 100..199, clustered into
+ *            X and Y, plus X alone over 400..499 and Y alone over 520..584.
+ * `speakers_per_frame` is 2 over the contested run, so two clusters take it:
+ * unsaturated T scores 2 against X and Y at 1 each and wins it with X (the
+ * lower id of the tied pair). Saturated, all three tie at 1 and T loses the
+ * run to X and Y — a different pair of speakers on the same evidence.
+ *
+ * Two slots of one window in one cluster is not exotic: `foldSmallClusters`
+ * and the share floor's Ward refit both merge clusters across a window's
+ * slots, and the powerset exists precisely to model two slots active at once.
+ */
+describe('the per-frame vote inside one window', () => {
+  const dim = 5;
+  const twinSlotEvidence = (): DiarizationEvidence => ({
+    totalSamples16k: TWO_WINDOWS,
+    windows: [
+      windowFromSlots(0, [[0, 100, 200], [1, 100, 200], [0, 250, 350]]),
+      windowFromSlots(1, [[0, 100, 200], [1, 100, 200], [0, 400, 500], [1, 520, 585]]),
+    ],
+    embeddings: [
+      { windowIndex: 0, localSpeaker: 0, activeFrames: 200, vector: axis(dim, 2) }, // T
+      { windowIndex: 0, localSpeaker: 1, activeFrames: 100, vector: axis(dim, 2) }, // T, same window
+      { windowIndex: 1, localSpeaker: 0, activeFrames: 200, vector: axis(dim, 0) }, // X
+      { windowIndex: 1, localSpeaker: 1, activeFrames: 165, vector: axis(dim, 1) }, // Y
+    ],
+  });
+  /** X = 0, Y = 1, T = 2 — T last, so a tie over 100..199 goes against it. */
+  const TWIN_LABELS = [2, 2, 0, 1];
+
+  it('the contested run is two speakers wide and both of window 0 slots are one cluster', () => {
+    const ev = twinSlotEvidence();
+    expect(assembledFrameCount(TWO_WINDOWS, 2)).toBe(652);
+    const spf = speakerCountPerFrame(ev.windows);
+    expect(spf[150]).toBe(2); // window 0 hears {T, T}, window 1 hears {X, Y}
+    expect(spf[300]).toBe(1); // window 0 alone hears T there, window 1 is silent
+    expect(TWIN_LABELS[0]).toBe(TWIN_LABELS[1]);
+    expect(ev.embeddings[0].windowIndex).toBe(ev.embeddings[1].windowIndex);
+  });
+
+  it('two slots of one window in one cluster vote TWICE, so that cluster takes the run', () => {
+    const floored = applyShareFloor(twinSlotEvidence(), TWIN_LABELS);
+    expect(floored.refit).toBe(false); // every share clears the floor: nothing here is the floor
+    expect(floored.spans[2]).toEqual([
+      { start: f16(100), end: f16(200) },
+      { start: f16(250), end: f16(350) },
+    ]);
+    expect(floored.spans[0]).toEqual([
+      { start: f16(100), end: f16(200) },
+      { start: f16(400), end: f16(500) },
+    ]);
+    // Y is beaten on the contested run and keeps only its exclusive turn
+    expect(floored.spans[1]).toEqual([{ start: f16(520), end: f16(585) }]);
+    const total = floored.speechSeconds.reduce((a, b) => a + b, 0);
+    expect(total).toBeCloseTo((465 * FRAME_SHIFT) / MODEL_SAMPLE_RATE, 9);
+    expect(floored.speechSeconds[1] / total).toBeGreaterThan(MIN_SPEAKER_SHARE);
   });
 });
 
