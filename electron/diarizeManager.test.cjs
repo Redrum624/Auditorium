@@ -784,22 +784,57 @@ describe('registerDiarizeIpc', () => {
     const sent = [];
     const win = { isDestroyed: () => false, webContents: { send: (ch, p) => sent.push([ch, p]) } };
     let mode = 'ok';
+    // The 200 ms gate reads Date.now(), so the ONLY way to prove the gate
+    // exists is to hold that clock: a burst of non-final events inside one
+    // window must collapse to a single send, and the next event past the
+    // window must send again. The `p.received === p.total` clause alone makes
+    // every 'final always sent' assertion pass with the time gate deleted —
+    // and with it deleted the 32.5 MB model bar (D2) sits at 0 % for the whole
+    // 26.5 MB embedder download and jumps to 100 % at the last byte.
+    const THROTTLE_MS = 200; // MODEL_PROGRESS_THROTTLE_MS (diarizeManager.cjs)
+    let clock = 1_757_000_000_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const total = DIARIZE_TOTAL_BYTES;
     const manager = {
       ensureModels: async ({ onProgress }) => {
         if (mode === 'fail') throw new Error('disk full');
+        if (mode === 'burst') {
+          // `lastSent` starts at 0 per invoke, so the first event always sends.
+          onProgress({ file: 'segmentation', fileIndex: 0, fileCount: 2, received: 1_310_723, total });
+          clock += THROTTLE_MS - 1; // 199 ms — still inside the window: dropped
+          onProgress({ file: 'segmentation', fileIndex: 0, fileCount: 2, received: 4_063_811, total });
+          clock += 1; // exactly THROTTLE_MS since the last send — the gate is `>=`
+          onProgress({ file: 'segmentation', fileIndex: 0, fileCount: 2, received: 7_337_209, total });
+          clock += 1; // one step past that send: dropped again
+          onProgress({ file: 'embedder', fileIndex: 1, fileCount: 2, received: 19_777_207, total });
+          onProgress({ file: 'embedder', fileIndex: 1, fileCount: 2, received: total, total }); // final byte ignores the clock
+          return {};
+        }
         onProgress({ file: 'segmentation', fileIndex: 0, fileCount: 2, received: 10, total: 100 });
         onProgress({ file: 'embedder', fileIndex: 1, fileCount: 2, received: 100, total: 100 });
         return {};
       },
     };
-    const { ipcMain, invoke } = fakeIpc();
-    registerDiarizeIpc({ ipcMain, manager, getWin: () => win });
-    expect(await invoke(DIARIZE_IPC.ensureModels)).toEqual({ ok: true });
-    const prog = sent.filter(([ch]) => ch === DIARIZE_IPC.modelProgress).map(([, p]) => p);
-    expect(prog[prog.length - 1]).toEqual({ received: 100, total: 100 });
-    for (const p of prog) expect(Object.keys(p).sort()).toEqual(['received', 'total']);
-    mode = 'fail';
-    expect(await invoke(DIARIZE_IPC.ensureModels)).toEqual({ ok: false, error: 'disk full' });
+    try {
+      const { ipcMain, invoke } = fakeIpc();
+      registerDiarizeIpc({ ipcMain, manager, getWin: () => win });
+      expect(await invoke(DIARIZE_IPC.ensureModels)).toEqual({ ok: true });
+      const prog = sent.filter(([ch]) => ch === DIARIZE_IPC.modelProgress).map(([, p]) => p);
+      expect(prog[prog.length - 1]).toEqual({ received: 100, total: 100 });
+      for (const p of prog) expect(Object.keys(p).sort()).toEqual(['received', 'total']);
+
+      // Five events, three sends: one per 200 ms window plus the final byte.
+      sent.length = 0;
+      mode = 'burst';
+      expect(await invoke(DIARIZE_IPC.ensureModels)).toEqual({ ok: true });
+      const throttled = sent.filter(([ch]) => ch === DIARIZE_IPC.modelProgress).map(([, p]) => p.received);
+      expect(throttled).toEqual([1_310_723, 7_337_209, total]);
+
+      mode = 'fail';
+      expect(await invoke(DIARIZE_IPC.ensureModels)).toEqual({ ok: false, error: 'disk full' });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   test('cancel and model-state pass through; a destroyed window receives nothing', async () => {
