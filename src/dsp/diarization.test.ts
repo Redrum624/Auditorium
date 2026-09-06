@@ -291,6 +291,49 @@ describe('window and frame arithmetic', () => {
     expect(frameToSample16k(250) - frameToSample16k(20)).toBe(230 * 270);
   });
 
+  /**
+   * `DiarizationSegment`'s overshoot bound, pinned at the constant and one
+   * step past it. The last assembled frame sits at a receptive-field CENTRE,
+   * so it lands past the audio; the bound is `RECEPTIVE_FIELD / 2` and it is
+   * ATTAINED, not approached — an exact window fit whose length is also a
+   * multiple of `FRAME_SHIFT` overshoots by exactly 495.5. The first such
+   * length is 432,000 (160000 + 17·16000, and 432000 = 1600·270), so the
+   * docblock may not say "under".
+   */
+  it('the closing frame overshoots the audio by at most half a receptive field, equality at 432,000', () => {
+    const overshoot = (total: number) =>
+      frameToSample16k(assembledFrameCount(total, expectedWindowCount(total)) - 1) - total;
+
+    // the exact constant: exact fit AND a whole number of frame shifts
+    expect(hasPaddedLastWindow(432000)).toBe(false);
+    expect(432000 % FRAME_SHIFT).toBe(0);
+    expect(assembledFrameCount(432000, expectedWindowCount(432000))).toBe(1601);
+    expect(overshoot(432000)).toBe(RECEPTIVE_FIELD / 2);
+
+    // one sample past it: a padded window, so the range is cut one frame short
+    // and the extra sample is subtracted too — 495.5 − 270 − 1
+    expect(hasPaddedLastWindow(432001)).toBe(true);
+    expect(overshoot(432001)).toBe(RECEPTIVE_FIELD / 2 - FRAME_SHIFT - 1);
+    // the next exact fit is not a frame-shift multiple, so it falls short
+    expect(overshoot(432000 + SEG_SHIFT)).toBe(RECEPTIVE_FIELD / 2 - (SEG_SHIFT % FRAME_SHIFT));
+    // a frame-shift multiple alone is NOT enough: 199,800 = 740·270 is padded,
+    // its range is cut a frame short, and it overshoots by 225.5
+    expect(199800 % FRAME_SHIFT).toBe(0);
+    expect(hasPaddedLastWindow(199800)).toBe(true);
+    expect(overshoot(199800)).toBe(RECEPTIVE_FIELD / 2 - FRAME_SHIFT);
+
+    // and nothing in the family beats the constant
+    for (let k = 0; k <= 40; k++) {
+      const fit = SEG_WINDOW + k * SEG_SHIFT;
+      for (const total of [fit, fit + 1, fit - 1, fit + 7919]) {
+        if (total <= 0) continue;
+        const over = overshoot(total);
+        expect(over).toBeLessThanOrEqual(RECEPTIVE_FIELD / 2);
+        expect(over === RECEPTIVE_FIELD / 2).toBe(!hasPaddedLastWindow(total) && total % FRAME_SHIFT === 0);
+      }
+    }
+  });
+
   it('fragment samples follow trunc(frame/589·160000) + i·16000 (the reference sample_offset)', () => {
     expect(fragmentSampleRange(0, 0, 589)).toEqual({ start: 0, end: 160000 });
     // 100/589·160000 = 27164.68 → 27164 ; 200/589·160000 = 54329.37 → 54329
@@ -987,12 +1030,18 @@ describe('assembleDiarization', () => {
 
 describe('the per-frame vote across a window boundary', () => {
   /**
-   * Every window covering a frame casts ONE vote per cluster it hears there
-   * (the reference's `relabels[i, j, t] = 1`, saturated per window however
-   * many local slots share the cluster, then `count[start:end] += this_chunk`
-   * once per window). So a cluster heard by two windows at the same global
-   * frame must score TWO — and the frame where two windows meet is exactly
-   * where a per-window saturation can leak into the next window and eat one.
+   * The shipped rule is ONE vote per (window, LOCAL SLOT, frame) —
+   * `diarcore.cjs:267`'s `count[(start + f) · numClusters + t] += 1`, with no
+   * per-window stamp; the Python reference's `relabels[i, j, t] = 1` is the
+   * DECLARED DEVIATION named in `diarization.ts` (`assembleLabels`) and
+   * discriminated by "the per-frame vote inside one window" below.
+   *
+   * What THIS fixture pins is the other half of that sum: the CROSS-window
+   * accumulation. Every window here gives its slots distinct clusters, so the
+   * two rules agree inside a window and only the accumulation across the
+   * boundary is under test — a cluster two windows hear at the same global
+   * frame must score TWO, and the frame where two windows meet is exactly
+   * where a botched `start` offset or a per-window stamp would eat one.
    *
    * The fixture is a three-way overlap at frame 59 = `windowStartFrame(1)`,
    * which the model cannot express (`powerset_max_classes` is 2), so the two

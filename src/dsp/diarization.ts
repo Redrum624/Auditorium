@@ -116,8 +116,15 @@ export interface DiarizationSegment {
    * 16 kHz positions at frame centres: `frame·270 + 991/2` (D3), so they end
    * in .5 — half-sample precision, rounded only when mapped to a document by
    * `segmentsToDocSamples`. The closing segment of a run that reaches the end
-   * of the assembled range may exceed `totalSamples16k` by under half a
-   * receptive field, as in the reference; the document mapping clamps.
+   * of the assembled range may exceed `totalSamples16k` by AT MOST half a
+   * receptive field, as in the reference — and the bound is attained, not
+   * approached: exactly `991/2` when the audio both fits the windows exactly
+   * (`hasPaddedLastWindow` false) and is a whole number of `FRAME_SHIFT`s,
+   * first at 432,000 samples (160000 + 17·16000 = 1600·270). A padded tail
+   * cuts the range one frame short and caps the overshoot at 225.5. The
+   * document mapping clamps either way; the bound is pinned in
+   * `diarization.test.ts` "overshoots the audio by at most half a receptive
+   * field".
    */
   startSample16k: number;
   endSample16k: number;
