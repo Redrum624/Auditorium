@@ -33,6 +33,13 @@ export const WIRE_CLASS_COUNT = 7;
 /** Embedding dimensions on the wire — `diarize:embedding` carries 1024 bytes
  * of float32 (D2: `vector: Float32Array(256)`). */
 export const WIRE_EMBED_DIMS = 256;
+/** Local speakers a window can carry, and therefore the range
+ * `diarize:embedding`'s `localSpeaker` must lie in: D2's powerset is drawn
+ * from slots 0..2, so 3 is the first value that is not a slot. Declared here
+ * for the same reason as the sizes above — this is the WIRE's number, not the
+ * assembly's `LOCAL_SPEAKERS`, and a fake that read the subject's constant
+ * would follow it rather than pin the contract. */
+export const WIRE_LOCAL_SPEAKERS = 3;
 /** The pinned two-file set's total, from `diarizeManager.cjs` DIARIZE_FILES
  * (5,992,913 + 26,530,550). */
 export const WIRE_MODEL_BYTES = 32523463;

@@ -26,6 +26,7 @@ import {
   WIRE_WINDOW_FRAMES,
   WIRE_CLASS_COUNT,
   WIRE_EMBED_DIMS,
+  WIRE_LOCAL_SPEAKERS,
   type DiarizeBackend,
 } from '../__mocks__/diarizeBackend';
 import { monoMix } from './transcribeService';
@@ -351,7 +352,17 @@ describe('diarizeChannels', () => {
     // 16 kHz fixture would cost.
     const long = [new Float32Array(7200001)];
     expect(modelLength16k(long[0].length, 1000)).toBeGreaterThan(MAX_DIARIZE_SAMPLES);
-    const result = await diarizeChannels({ channels: long, sampleRate: 1000 });
+    const promise = diarizeChannels({ channels: long, sampleRate: 1000 });
+    // BEFORE the first await, which is what makes this a test of the
+    // PRE-allocation guard rather than of the status. The cap is checked in
+    // the synchronous prefix, ahead of the reservation and ahead of the model
+    // probe, so a refusal that has neither reserved the run nor probed cannot
+    // have mono-mixed 7,200,001 samples and resampled them into the 460 MB
+    // buffer the guard exists to refuse. `status` alone proves nothing: any
+    // later cap check answers 'too-long' too, having done exactly that work.
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.modelStateCalls).toBe(0);
+    const result = await promise;
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.status).toBe('too-long');
@@ -365,12 +376,53 @@ describe('diarizeChannels', () => {
     expect(modelLength16k(7200001, 1000)).toBe(MAX_DIARIZE_SAMPLES + 16);
   });
 
-  it('refuses empty audio without invoking', async () => {
-    const result = await diarizeChannels({ channels: [new Float32Array(0)], sampleRate: SOURCE_RATE });
+  it('predicts the resampled length exactly, which is why the cap is enforced once', () => {
+    // WHY the run checks the cap BEFORE the mono mix and never again after the
+    // resample: `modelLength16k` IS `resampleChannel`'s own
+    // `round(length x toRate / fromRate)` (`resample.ts:97-98`) applied to the
+    // mono mix, and `monoMix` returns exactly `length` samples
+    // (`transcribeService.ts:394-395`) — same expression, same doubles. A
+    // second cap check after the resample could therefore never fire on
+    // anything the pre-check let through, and an unreachable guard reads like
+    // a real one. This is that identity across the rates a run can meet: an
+    // exact downsample, a rounding one, the `fromRate === toRate` short
+    // circuit, an upsample, and the source that rounds away to nothing plus
+    // the one step past it (which the post-resample ZERO check does catch —
+    // the one thing the prediction cannot express as a cap).
+    const cases: [length: number, rate: number][] = [
+      [SOURCE_LENGTH, SOURCE_RATE],
+      [4411, 44100],
+      [1, 44100],
+      [2, 44100],
+      [1000, 16000],
+      [1000, 8000],
+      [999, 22050],
+      [4801, 48000],
+    ];
+    for (const [length, rate] of cases) {
+      const mixed = monoMix([makeSignal(length, 17), makeSignal(length, 909)], length);
+      expect(mixed).toHaveLength(length);
+      expect(resampleChannel(mixed, rate, DIARIZE_SAMPLE_RATE)).toHaveLength(modelLength16k(length, rate));
+    }
+  });
+
+  it('refuses empty audio in its own words, before the model probe', async () => {
+    const promise = diarizeChannels({ channels: [new Float32Array(0)], sampleRate: SOURCE_RATE });
+    // The pair this half pins (the other half is the test below): an empty
+    // source is refused in the synchronous prefix, so nothing is reserved and
+    // the model is never probed. Without that check the run would probe,
+    // mono-mix and resample an empty buffer and land in the post-resample
+    // "too short" guard — same status, different guard, different sentence.
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.modelStateCalls).toBe(0);
+    const result = await promise;
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.status).toBe('failed');
+    expect(result.message).toBe('There is no audio to separate into speakers.');
     expect(backend.runCalls).toBe(0);
+    // No audio is a user-input condition, not a crash.
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
   });
 
   it('refuses a source that resamples away to nothing, and accepts one sample more', async () => {
@@ -641,6 +693,91 @@ describe('host failures', () => {
     if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
     expect(result.evidence.windows).toHaveLength(3);
     expect(result.diarization.speakerCount).toBe(2);
+  });
+
+  it('keeps the FIRST valid window at an index when the host re-sends one', async () => {
+    // A re-sent index is a protocol violation whichever way it is resolved;
+    // what must not be left undecided is WHICH payload the assembly sees. The
+    // rule is first-VALID-wins (the `has` gate in `acceptWindow`, which a
+    // malformed payload never reaches the `set` of), and the second window
+    // here is one the per-frame vote notices: all 589 frames class 1 puts
+    // local slot 0 — voice A — on every frame window 2 covers, so last-wins
+    // would hand back a different segmentation, not merely different bytes.
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    for (let i = 0; i < 3; i++) backend.emit.window({ index: i, labels: fixtureWindow() });
+    const allVoiceA = classWindow([{ from: 0, to: WIRE_WINDOW_FRAMES, class: 1 }]);
+    backend.emit.window({ index: 2, labels: allVoiceA });
+    FIXTURE_AXES.forEach((f, k) => {
+      backend.emit.embedding({
+        windowIndex: f.windowIndex,
+        localSpeaker: f.localSpeaker,
+        activeFrames: ACTIVE_FRAMES[f.localSpeaker],
+        vector: speakerVector(f.axis, 4000 + k * 37),
+      });
+    });
+    backend.settle({ ok: true, windowCount: 3 });
+    const result = await promise;
+    if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
+    expect(result.evidence.windows[2]).toEqual(fixtureWindow());
+    // The fixture's own two segments, unchanged by the late arrival.
+    expect(result.diarization.segments).toEqual([
+      { startSample16k: frameToSample16k(0), endSample16k: frameToSample16k(259), speaker: 0 },
+      { startSample16k: frameToSample16k(259), endSample16k: frameToSample16k(708), speaker: 1 },
+    ]);
+    // ...and the discrimination: the payload that was ignored really would
+    // have changed the answer, so "first wins" is a claim with teeth.
+    const lastWins = assembleDiarization({
+      ...result.evidence,
+      windows: [result.evidence.windows[0], result.evidence.windows[1], allVoiceA],
+    });
+    expect(lastWins.segments).not.toEqual(result.diarization.segments);
+  });
+
+  it('drops an embedding whose slot, window index or frame count is outside the contract', async () => {
+    // Four rows the host must never send. Each of the first three makes
+    // `assembleDiarization` throw a RangeError if it is let through
+    // (`diarization.ts` checkEvidence) — which is a whole FAILED run plus a
+    // native error box for one malformed fragment, instead of one dropped
+    // fragment and nine good ones. The boundary is pinned from both sides:
+    // slots 0..2 are the nine good fragments above, WIRE_LOCAL_SPEAKERS (3)
+    // is the first slot past the top and -1 the first below; windowIndex -1
+    // clears the `< windows.length` filter that catches the window-7 row in
+    // the test below, so this guard is the only thing that stops it.
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    for (let i = 0; i < 3; i++) backend.emit.window({ index: i, labels: fixtureWindow() });
+    FIXTURE_AXES.forEach((f, k) => {
+      backend.emit.embedding({
+        windowIndex: f.windowIndex,
+        localSpeaker: f.localSpeaker,
+        activeFrames: ACTIVE_FRAMES[f.localSpeaker],
+        vector: speakerVector(f.axis, 4000 + k * 37),
+      });
+    });
+    backend.emit.embedding({ windowIndex: -1, localSpeaker: 0, activeFrames: 200, vector: speakerVector(0, 11) });
+    backend.emit.embedding({
+      windowIndex: 0,
+      localSpeaker: WIRE_LOCAL_SPEAKERS,
+      activeFrames: 200,
+      vector: speakerVector(0, 12),
+    });
+    backend.emit.embedding({ windowIndex: 0, localSpeaker: -1, activeFrames: 200, vector: speakerVector(1, 13) });
+    // The fourth is the one the assembly would NOT notice: `activeFrames` is
+    // carried in the evidence and recomputed by `embeddableFragments`, so a
+    // negative count corrupts nothing downstream — it is dropped because a
+    // count of turns below zero is not a thing the host may say, and the
+    // evidence this service hands the dialog is the evidence it validated.
+    backend.emit.embedding({ windowIndex: 1, localSpeaker: 0, activeFrames: -1, vector: speakerVector(0, 14) });
+    backend.settle({ ok: true, windowCount: 3 });
+    const result = await promise;
+    if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
+    expect(result.evidence.embeddings.map((e) => [e.windowIndex, e.localSpeaker])).toEqual(
+      FIXTURE_AXES.map((f) => [f.windowIndex, f.localSpeaker])
+    );
+    expect(result.diarization.speakerCount).toBe(2);
+    // One malformed fragment is not a failed run: no native box.
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
   });
 
   it('drops an embedding carrying a non-finite component', async () => {

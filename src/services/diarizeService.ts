@@ -475,9 +475,21 @@ const CANCELLED_MESSAGE = 'Speaker separation was cancelled.';
 
 /**
  * Accumulates one 'diarize:window' payload. Validated at this boundary like
- * any other cross-process payload: a window of the wrong length or carrying a
- * class outside the powerset would make `assembleDiarization` throw, so it is
- * DROPPED here and the window-count gate below reports the shortfall.
+ * any other cross-process payload, with each check doing a different job:
+ *
+ *   - The PAYLOAD checks are the load-bearing ones: a window of the wrong
+ *     length or carrying a class outside the powerset would make
+ *     `assembleDiarization` throw, so it is DROPPED here and the window-count
+ *     gate reports the shortfall.
+ *   - The `has` check makes a re-sent index deterministic: the first VALID
+ *     payload for an index wins, and a malformed one never takes the slot,
+ *     because it is rejected below and never stored. Nothing in the protocol
+ *     says which of two payloads is the truthful one, so the rule is simply
+ *     fixed and pinned rather than left to arrival timing.
+ *   - The INDEX check is boundary hygiene, and claims no more than that: the
+ *     assembly only ever reads keys 0..windowCount-1, so a negative or
+ *     fractional index could not reach it in any case — this keeps junk keys
+ *     out of the map instead of letting a misbehaving host grow it.
  */
 function acceptWindow(run: ActiveRun, w: { index: number; labels: ArrayBuffer }): void {
   if (!Number.isInteger(w.index) || w.index < 0) return;
@@ -618,18 +630,35 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     // Door 2 (D5): after the resample, before anything is spawned.
     if (req.shouldCancel?.() || run.cancelled) return fail('cancelled', CANCELLED_MESSAGE);
 
-    // `resampleChannel` rounds independently of the prediction above, so the
-    // buffer's real length is what the host is told and what the window
-    // arithmetic is relative to — and what the manager's cap is applied to.
+    // The buffer's real length is what the host is told and what the window
+    // arithmetic is relative to. It is deliberately NOT re-tested against the
+    // 2-hour cap: `modelLength16k` is `resampleChannel`'s own
+    // `round(length * toRate / fromRate)` (`resample.ts:97-98`) applied to the
+    // mono mix, and `monoMix` returns exactly `length` samples
+    // (`transcribeService.ts:394-395`) — the same expression on the same
+    // doubles, so a second cap check here could not fire on anything the
+    // pre-check let through, and an unreachable guard reads like a real one.
+    // The cap is enforced ONCE, before the multi-hundred-megabyte allocation
+    // (`modelLength16k`'s docblock); the identity that makes once enough is
+    // pinned by the test 'predicts the resampled length exactly'.
+    //
+    // What this length DOES decide is the thing the prediction cannot express
+    // as a cap: a non-empty source that rounds away to nothing (one 44.1 kHz
+    // sample -> 0 samples at 16 kHz) must not reach the host.
     run.totalSamples16k = outgoing.length;
     if (outgoing.length === 0) return fail('failed', 'The audio is too short to separate into speakers.');
-    if (outgoing.length > MAX_DIARIZE_SAMPLES) {
-      return fail('too-long', 'Speaker separation is limited to 2 hours of audio in one job.');
-    }
 
+    // `active !== run` is the ENTIRE guard on all three handlers, and a
+    // `run.settled` read alongside it would be unkillable code pretending to
+    // cover a window that does not exist: the `finally` below sets `settled`,
+    // unsubscribes and nulls `active` in one synchronous block with no yield
+    // between them, so no event can be dispatched into a handler after this
+    // run settled and before `active` stopped being it. A listener that
+    // somehow outlived its unsubscribe meets the same guard: it closes over
+    // THIS run, and `active` is by then null or the next one.
     unsubscribers.push(
       bridge.onDiarizeProgress((p) => {
-        if (active !== run || run.settled) return; // settled-run chatter is dropped
+        if (active !== run) return; // chatter from a superseded run is dropped
         const total = Number.isFinite(p.total) && p.total > 0 ? p.total : 0;
         const done = Number.isFinite(p.done) && p.done > 0 ? p.done : 0;
         const now = Date.now();
@@ -682,14 +711,14 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
 
     unsubscribers.push(
       bridge.onDiarizeWindow((w) => {
-        if (active !== run || run.settled) return;
+        if (active !== run) return;
         acceptWindow(run, w);
       })
     );
 
     unsubscribers.push(
       bridge.onDiarizeEmbedding((e) => {
-        if (active !== run || run.settled) return;
+        if (active !== run) return;
         acceptEmbedding(run, e);
       })
     );
@@ -753,6 +782,11 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     // The host counts what it emitted; a mismatch means window events were
     // dropped or malformed, and the assembly would silently describe a
     // shorter recording than the one that was analysed.
+    //
+    // The loop walks 0..windowCount-1 and stops at the FIRST gap, so a
+    // full-length `windows` is already proof that every index the assembly
+    // will read arrived — the map's `size` cannot add anything to that test
+    // (a junk key could only make it larger), so it is not consulted.
     const windowCount = result.windowCount;
     const windows: Uint8Array[] = [];
     for (let i = 0; i < windowCount; i++) {
@@ -760,7 +794,7 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
       if (!w) break;
       windows.push(w);
     }
-    if (windows.length !== windowCount || run.windows.size < windowCount) {
+    if (windows.length !== windowCount) {
       const message = `The speaker host reported ${windowCount} window(s) but delivered ${windows.length}.`;
       showFailure(message);
       return fail('failed', message);
