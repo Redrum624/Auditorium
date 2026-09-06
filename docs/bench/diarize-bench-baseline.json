@@ -1,6 +1,6 @@
 {
   "script": "scripts/diarize-bench.cjs",
-  "generated": "2026-09-06T02:36:40.824Z",
+  "generated": "2026-09-06T08:04:15.960Z",
   "policy": {
     "threshold": 0.55,
     "minClusterSize": 4,
@@ -37,6 +37,15 @@
       "mode": "--direct",
       "description": "--direct — 16 kHz speech straight to the diarizer (the sweep condition)",
       "ran": true,
+      "machine": {
+        "platform": "win32",
+        "arch": "x64",
+        "cpu": "Intel(R) Core(TM) i7-10875H CPU @ 2.30GHz",
+        "cpus": 16,
+        "memGb": 64,
+        "node": "v24.13.0",
+        "onnxruntimeNode": "1.27.0"
+      },
       "counts": [
         2,
         2,
@@ -79,22 +88,22 @@
             "rate": 1
           },
           "ms": {
-            "decode": 9.7,
-            "init": 967.2,
+            "decode": 5.2,
+            "init": 739,
             "stemInit": null,
             "stem": null,
-            "resample": 2.3,
-            "segment": 197.4,
-            "embed": 1249.4,
-            "assemble": 7.7,
-            "total": 2424
+            "resample": 1.7,
+            "segment": 114.6,
+            "embed": 633,
+            "assemble": 4.1,
+            "total": 1492.4
           },
           "msPerAudioSecond": {
             "stem": null,
-            "segment": 12.3,
-            "embed": 78.1,
-            "assemble": 0.5,
-            "total": 151.5
+            "segment": 7.2,
+            "embed": 39.6,
+            "assemble": 0.3,
+            "total": 93.3
           }
         },
         {
@@ -123,22 +132,22 @@
             "rate": 1
           },
           "ms": {
-            "decode": 13.1,
-            "init": 178.4,
+            "decode": 7.3,
+            "init": 90.9,
             "stemInit": null,
             "stem": null,
-            "resample": 4.4,
-            "segment": 532.1,
-            "embed": 6175,
-            "assemble": 16.6,
-            "total": 6906.4
+            "resample": 2.6,
+            "segment": 298.1,
+            "embed": 3475.1,
+            "assemble": 8.3,
+            "total": 3875
           },
           "msPerAudioSecond": {
             "stem": null,
-            "segment": 15.7,
-            "embed": 181.6,
-            "assemble": 0.5,
-            "total": 203.1
+            "segment": 8.8,
+            "embed": 102.2,
+            "assemble": 0.2,
+            "total": 114
           }
         },
         {
@@ -167,22 +176,22 @@
             "rate": 0.9647
           },
           "ms": {
-            "decode": 18.8,
-            "init": 193.7,
+            "decode": 10.8,
+            "init": 82.9,
             "stemInit": null,
             "stem": null,
-            "resample": 8.2,
-            "segment": 900.2,
-            "embed": 10746.9,
-            "assemble": 47.5,
-            "total": 11896.5
+            "resample": 3.6,
+            "segment": 486.4,
+            "embed": 5553.3,
+            "assemble": 9.6,
+            "total": 6135.8
           },
           "msPerAudioSecond": {
             "stem": null,
-            "segment": 16.4,
-            "embed": 196.1,
-            "assemble": 0.9,
-            "total": 217.1
+            "segment": 8.9,
+            "embed": 101.3,
+            "assemble": 0.2,
+            "total": 112
           }
         },
         {
@@ -215,22 +224,22 @@
             "rate": 1
           },
           "ms": {
-            "decode": 16.5,
-            "init": 162.4,
+            "decode": 10.4,
+            "init": 90.9,
             "stemInit": null,
             "stem": null,
-            "resample": 10.2,
-            "segment": 942,
-            "embed": 6424.2,
-            "assemble": 15.9,
-            "total": 7554.6
+            "resample": 3.6,
+            "segment": 508.2,
+            "embed": 3296.9,
+            "assemble": 5.3,
+            "total": 3904.8
           },
           "msPerAudioSecond": {
             "stem": null,
-            "segment": 16.6,
-            "embed": 113,
-            "assemble": 0.3,
-            "total": 132.9
+            "segment": 8.9,
+            "embed": 58,
+            "assemble": 0.1,
+            "total": 68.7
           }
         }
       ]
@@ -239,6 +248,15 @@
       "mode": "--full-chain",
       "description": "--full-chain — WAV → 44.1 kHz stereo → HT-Demucs → Vocals → the diarizer (D1)",
       "ran": true,
+      "machine": {
+        "platform": "win32",
+        "arch": "x64",
+        "cpu": "Intel(R) Core(TM) i7-10875H CPU @ 2.30GHz",
+        "cpus": 16,
+        "memGb": 64,
+        "node": "v24.13.0",
+        "onnxruntimeNode": "1.27.0"
+      },
       "counts": [
         2,
         2,
@@ -281,22 +299,22 @@
             "rate": 1
           },
           "ms": {
-            "decode": 9.2,
-            "init": 270.1,
-            "stemInit": 13428.5,
-            "stem": 17114.8,
-            "resample": 826.6,
-            "segment": 315.7,
-            "embed": 1421.6,
-            "assemble": 2.8,
-            "total": 33379.9
+            "decode": 5.2,
+            "init": 85.8,
+            "stemInit": 5176.8,
+            "stem": 8114.9,
+            "resample": 470.7,
+            "segment": 95.2,
+            "embed": 638.6,
+            "assemble": 1.8,
+            "total": 14583.8
           },
           "msPerAudioSecond": {
-            "stem": 1069.7,
-            "segment": 19.7,
-            "embed": 88.9,
-            "assemble": 0.2,
-            "total": 2086.2
+            "stem": 507.2,
+            "segment": 6,
+            "embed": 39.9,
+            "assemble": 0.1,
+            "total": 911.5
           }
         },
         {
@@ -325,22 +343,22 @@
             "rate": 0.9191
           },
           "ms": {
-            "decode": 16.9,
-            "init": 178.3,
-            "stemInit": 11870.8,
-            "stem": 33099.4,
-            "resample": 1752.1,
-            "segment": 518.2,
-            "embed": 5748.1,
-            "assemble": 13.2,
-            "total": 53180.2
+            "decode": 7.3,
+            "init": 85.7,
+            "stemInit": 5261.1,
+            "stem": 16427.7,
+            "resample": 957.4,
+            "segment": 300.3,
+            "embed": 3017,
+            "assemble": 7.5,
+            "total": 26056.7
           },
           "msPerAudioSecond": {
-            "stem": 973.5,
-            "segment": 15.2,
-            "embed": 169.1,
-            "assemble": 0.4,
-            "total": 1564.1
+            "stem": 483.2,
+            "segment": 8.8,
+            "embed": 88.7,
+            "assemble": 0.2,
+            "total": 766.4
           }
         },
         {
@@ -369,22 +387,22 @@
             "rate": 0.9677
           },
           "ms": {
-            "decode": 18.2,
-            "init": 177.9,
-            "stemInit": 10139.8,
-            "stem": 50214.8,
-            "resample": 2477.7,
-            "segment": 911.9,
-            "embed": 10626.9,
-            "assemble": 15.9,
-            "total": 74564.8
+            "decode": 12,
+            "init": 84.3,
+            "stemInit": 5283.4,
+            "stem": 27715,
+            "resample": 1527.4,
+            "segment": 606.4,
+            "embed": 6034.9,
+            "assemble": 10.5,
+            "total": 41261.9
           },
           "msPerAudioSecond": {
-            "stem": 916.2,
-            "segment": 16.6,
-            "embed": 193.9,
-            "assemble": 0.3,
-            "total": 1360.5
+            "stem": 505.7,
+            "segment": 11.1,
+            "embed": 110.1,
+            "assemble": 0.2,
+            "total": 752.9
           }
         },
         {
@@ -417,22 +435,22 @@
             "rate": 1
           },
           "ms": {
-            "decode": 18.8,
-            "init": 187.1,
-            "stemInit": 10243.9,
-            "stem": 54652.6,
-            "resample": 2498,
-            "segment": 985.7,
-            "embed": 7159.2,
-            "assemble": 22.6,
-            "total": 75748.9
+            "decode": 11.6,
+            "init": 83.7,
+            "stemInit": 5286.7,
+            "stem": 28196.6,
+            "resample": 1608.2,
+            "segment": 677.7,
+            "embed": 3525.7,
+            "assemble": 16.5,
+            "total": 39395.1
           },
           "msPerAudioSecond": {
-            "stem": 961.2,
-            "segment": 17.3,
-            "embed": 125.9,
-            "assemble": 0.4,
-            "total": 1332.2
+            "stem": 495.9,
+            "segment": 11.9,
+            "embed": 62,
+            "assemble": 0.3,
+            "total": 692.8
           }
         }
       ]

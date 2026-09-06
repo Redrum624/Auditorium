@@ -937,11 +937,11 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
 
   it('VP3. the estimate sums stage 1 and the WHOLE of stage 2 — segmentation AND embedding', async () => {
     // 900 audio seconds, not the 16 s a small fixture would use: at 16 s
-    // Demucs alone (10.53 s), Demucs + segmentation (10.66 s) and D1's whole
-    // stage 1 + 2 (11.54 s) all round to the same 0:11, so the pin would be
-    // measuring the identity. At 900 s they separate: 9:52 / 9:59 / 10:49.
-    // A mono 8 kHz document because only length / sampleRate reaches the
-    // estimate, and 900 s of 44.1 kHz stereo is 317 MB of fixture.
+    // Demucs alone (10.53 s), Demucs + segmentation (10.69 s) and D1's whole
+    // stage 1 + 2 (11.89 s) all round to the same 0:11 or 0:12, so the pin
+    // would be measuring the identity. At 900 s they separate: 9:52 / 10:01 /
+    // 11:09. A mono 8 kHz document because only length / sampleRate reaches
+    // the estimate, and 900 s of 44.1 kHz stereo is 317 MB of fixture.
     const doc = createDocument({
       name: 'long.wav',
       sampleRate: 8_000,
@@ -950,14 +950,14 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     useAppStore.getState().addDocument(doc);
     await renderVoice();
 
-    // 900 / 1.52 = 592.11 s of Demucs + 900 x (8 + 55) ms = 56.7 s of
-    // segmentation + embedding = 648.81 s. The embedding half is 6.9x the
+    // 900 / 1.52 = 592.11 s of Demucs + 900 x (10 + 75) ms = 76.5 s of
+    // segmentation + embedding = 668.61 s. The embedding half is 7.5x the
     // segmentation half, so dropping it is the bigger of the two errors.
     const estimate = screen.getByTestId('separate-estimate');
-    expect(estimate).toHaveTextContent('10:49');
+    expect(estimate).toHaveTextContent('11:09');
     // Demucs alone, and Demucs + segmentation only: both understate the wait.
     expect(estimate).not.toHaveTextContent('9:52');
-    expect(estimate).not.toHaveTextContent('9:59');
+    expect(estimate).not.toHaveTextContent('10:01');
     expect(estimate).toHaveTextContent('plus a short pass to tell the voices apart');
   });
 
@@ -1170,9 +1170,13 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     );
     expect(shares).toEqual([77, 23]);
     expect(shares[0] + shares[1]).toBe(100);
-    // D4's worked example: 15 min of 44.1 kHz stereo is 317.5 MB per speaker.
+    // D4's worked example: 15 min of 44.1 kHz stereo is 317.5 MB per document,
+    // and a two-speaker landing is THREE of them — the two speakers and the
+    // Backing `landSpeakers` builds beside them. 635.0 MB would be the two
+    // speakers alone, which is not a landing this dialog can produce.
     expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('317.5 MB');
-    expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('635.0 MB');
+    expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('952.6 MB');
+    expect(screen.getByTestId('speaker-review-size')).not.toHaveTextContent('635.0 MB');
     expect(screen.getByTestId('speaker-count')).toHaveValue('2');
     expect(screen.getByTestId('speaker-review-limits')).toHaveTextContent(limitsSentence());
     expect(mockLandSpeakers).not.toHaveBeenCalled();
@@ -1196,7 +1200,8 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(screen.getByTestId('speaker-review-headline')).toHaveTextContent('Found 3 speakers');
     expect(screen.getByTestId('speaker-review-row-3')).toHaveTextContent('0:06');
     expect(screen.getByTestId('speaker-review-row-3')).toHaveTextContent('50%');
-    expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('952.6 MB');
+    // Three speakers plus the Backing: 4 x 317.5 MB on this 15-minute source.
+    expect(screen.getByTestId('speaker-review-size')).toHaveTextContent('1.3 GB');
     expect(screen.getByRole('button', { name: 'Land 3 speakers + Backing' })).toBeInTheDocument();
   });
 
@@ -1447,7 +1452,18 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
 
   it('VR12. Land uses the RE-CLUSTERED spans, not the ones the auto pass produced', async () => {
     seedDoc();
-    const { output } = await runToReview();
+    // A FIVE-minute source, not the fixture's fifteen: three speakers plus the
+    // Backing is four full-length documents, and at fifteen minutes that is
+    // 1.27 GB — over the budget, so Land would be disabled and this test would
+    // pass for the wrong reason. Five minutes prices the same landing at
+    // 423.4 MB. Nothing else here depends on the length.
+    const output = makeVoiceOutput({ lengthSamples: 5 * 60 * SR });
+    mockSeparate.mockResolvedValue({ ok: true, output });
+    mockDiarize.mockResolvedValue({ ok: true, evidence: makeEvidence(), diarization: makeDiarization() });
+    await renderVoice();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
     const three = makeThreeSpeakers();
     mockRecluster.mockReturnValue(three);
 
@@ -1480,33 +1496,28 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
 
   it('VR14. a landing that would not fit in memory is refused with its own figure', async () => {
     seedDoc();
-    // D4: 4 x 317.52 MB = 1.27 GB, over the 1.2 GB budget by a margin the
-    // user can act on. Three of the same speakers (952.6 MB) is under it.
-    await runToReview(makeThreeSpeakers());
-    expect(screen.getByRole('button', { name: 'Land 3 speakers + Backing' })).toBeEnabled();
+    // D4, priced at what `landSpeakers` ALLOCATES: N speakers plus a
+    // full-length Backing. On this 15-minute stereo source that is 317.52 MB a
+    // document, so two speakers cost 3 x 317.52 = 952.6 MB (under the 1.2 GB
+    // budget) and three cost 4 x 317.52 = 1.27 GB (over it). Counted at N
+    // documents instead, three speakers would read 952.6 MB, pass the gate,
+    // and then allocate 1.27 GB — which is the bug this boundary pins.
+    await runToReview();
+    expect(screen.getByRole('button', { name: 'Land 2 speakers + Backing' })).toBeEnabled();
     expect(screen.queryByTestId('speaker-review-budget')).not.toBeInTheDocument();
-
-    mockRecluster.mockReturnValue(
-      makeDiarization({
-        speakerCount: 4,
-        rawClusterCount: 4,
-        speechSeconds: [3, 3, 3, 3],
-        segments: [
-          { startSample16k: 8_000, endSample16k: 56_000, speaker: 0 },
-          { startSample16k: 72_000, endSample16k: 120_000, speaker: 1 },
-          { startSample16k: 136_000, endSample16k: 184_000, speaker: 2 },
-          { startSample16k: 200_000, endSample16k: 248_000, speaker: 3 },
-        ],
-      })
+    expect(screen.getByTestId('speaker-review-size')).toHaveTextContent(
+      'Each speaker track is a full-length copy of the voice — 317.5 MB; 2 of them plus the Backing need 952.6 MB of memory.'
     );
+
+    mockRecluster.mockReturnValue(makeThreeSpeakers());
     await act(async () => {
-      fireEvent.change(screen.getByTestId('speaker-count'), { target: { value: '4' } });
+      fireEvent.change(screen.getByTestId('speaker-count'), { target: { value: '3' } });
     });
 
     expect(screen.getByTestId('speaker-review-budget')).toHaveTextContent(
-      'These 4 speaker tracks would need 1.3 GB; pick fewer speakers or trim the source.'
+      'These 3 speaker tracks and the Backing would need 1.3 GB; pick fewer speakers or trim the source.'
     );
-    const land = screen.getByRole('button', { name: 'Land 4 speakers + Backing' });
+    const land = screen.getByRole('button', { name: 'Land 3 speakers + Backing' });
     expect(land).toBeDisabled();
     fireEvent.click(land);
     expect(mockLandSpeakers).not.toHaveBeenCalled();
@@ -1518,12 +1529,12 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // budget line about a count they no longer want. The landing here is also
     // what proves the click above landed nothing because the button was
     // refused, and not because the mock was never going to be called.
-    mockRecluster.mockReturnValue(makeThreeSpeakers());
+    mockRecluster.mockReturnValue(makeDiarization());
     await act(async () => {
-      fireEvent.change(screen.getByTestId('speaker-count'), { target: { value: '3' } });
+      fireEvent.change(screen.getByTestId('speaker-count'), { target: { value: '2' } });
     });
     expect(screen.queryByTestId('speaker-review-budget')).not.toBeInTheDocument();
-    const backDown = screen.getByRole('button', { name: 'Land 3 speakers + Backing' });
+    const backDown = screen.getByRole('button', { name: 'Land 2 speakers + Backing' });
     expect(backDown).toBeEnabled();
     await act(async () => {
       fireEvent.click(backDown);
@@ -1533,10 +1544,11 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
 
   it('VR15. the budget gate is pinned AT the constant and one step past it', async () => {
     seedDoc();
-    // Two speakers, so the ceiling is reached by the document size alone.
-    const atBudget = SPEAKER_LANDING_BUDGET_BYTES / 2 / (2 * 4);
+    // Two speakers, so the landing is THREE documents (the two speakers and
+    // the Backing) and the ceiling is reached by the document size alone.
+    const atBudget = SPEAKER_LANDING_BUDGET_BYTES / 3 / (2 * 4);
     const output = makeVoiceOutput({ lengthSamples: atBudget });
-    expect(speakerDocumentBytes(output) * 2).toBe(SPEAKER_LANDING_BUDGET_BYTES);
+    expect(speakerDocumentBytes(output) * 3).toBe(SPEAKER_LANDING_BUDGET_BYTES);
     mockSeparate.mockResolvedValue({ ok: true, output });
     const first = await renderVoice();
     await act(async () => {

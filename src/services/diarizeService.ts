@@ -125,41 +125,49 @@ export const DIARIZE_MODEL_BYTES = 32523463;
  * Time-estimate seed for the SEGMENTATION stage: milliseconds of wall clock
  * per audio second.
  *
- * MEASURED, not chosen (D5): the spike's four recordings segmented at 5.50 /
- * 8.12 / 8.01 / 8.58 ms per audio second on this machine
- * (`spike-results.json`, `segmentation_ms / duration_s`). 8 is the top of that
- * range only for the SHORTEST file and sits just under the three longer ones,
- * so this seed reads a little short rather than long — it is not the
- * finishes-early direction, and it is not pretended to be. Two things make
- * that acceptable: the seed is used only until the host's first progress
- * event lands, after which the estimate comes from THIS run's own measured
- * rate, and segmentation owns about 1 % of the overall bar (`stageWeights`),
- * so the worst shortfall in the set — 0.58 ms per audio second, on the
- * 56.9 s file — is invisible next to Demucs. Task 8 re-measures it on the
- * bench; re-tuning it here without that run is not allowed.
+ * MEASURED, not chosen (D5), and re-derived in Task 8 from the SHIPPED path:
+ * the median of the four `--full-chain` rows of
+ * `docs/bench/diarize-bench-baseline.json` — 6.0 / 8.8 / 11.1 / 11.9 ms per
+ * audio second, median 9.95, rounded to the nearest whole ms. `--full-chain`
+ * rather than `--direct` because that is what the dialog runs (D1: Demucs
+ * first, the Vocals stem second), and the median rather than the mean or the
+ * range's top because one 16 s file sits a full 5 ms below the other three and
+ * would drag either of those toward a figure no row actually measured.
+ *
+ * It REPLACES a seed of 8 taken from `spike-results.json`, which was measured
+ * before the sweep chose this model set. `diarizeService.test.ts` re-derives
+ * this number from the baseline file, so re-tuning it is a new bench run, not
+ * an edit — and the bench must be run on an IDLE machine: the same script
+ * under concurrent jest load measured 15.2-19.7 here, roughly double.
  */
-export const MEASURED_SEGMENT_MS_PER_S = 8;
+export const MEASURED_SEGMENT_MS_PER_S = 10;
 
 /**
  * Time-estimate seed for the EMBEDDING stage: milliseconds of wall clock per
  * audio SECOND (not per fragment).
  *
- * MEASURED (D5): the spike's four recordings embedded at 29.13 / 45.71 /
- * 65.29 / 72.51 ms per audio second (`spike-results.json`,
- * `embedding_ms / duration_s`), and 55 sits between the middle two of that
- * spread — 45.71 and 65.29, whose mean, the median of the four, is 55.50, so
- * D5's seed is that median rounded down. It is neither the midpoint of the
- * 29-73 range (~51) nor its top. The spread is wide (the slowest file costs
- * 2.5x the fastest), so a seed at the top would over-state the wait on half
- * the set; the middle of the set is the honest first guess, and it too is
- * replaced by this run's own measured rate at the first embed event.
+ * MEASURED (D5), and re-derived in Task 8 by the same rule as the
+ * segmentation seed above: the median of the four `--full-chain` rows of
+ * `docs/bench/diarize-bench-baseline.json` — 39.9 / 88.7 / 110.1 / 62.0 ms
+ * per audio second, median 75.35, rounded to the nearest whole ms. The spread
+ * is wide (the slowest file costs 2.8x the fastest, and it is fragment count
+ * per second that moves it, not length), so a seed at the top would over-state
+ * the wait on half the set; the middle of the set is the honest first guess,
+ * and it is replaced by this run's own measured rate at the first embed event.
+ *
+ * It REPLACES a seed of 55 that was not a measurement of this stage at all:
+ * `spike-results.json`'s `method.embedding_model` is `campplus-voxceleb.onnx`
+ * — CAM++, the embedder the Transcribe panel uses and the one the sweep
+ * REJECTED for this feature. The shipped embedder is WeSpeaker ResNet34-LM
+ * (`diarizeManager.cjs` DIARIZE_FILES), which is a heavier network, and every
+ * row of the shipped bench exceeded the old seed.
  *
  * Per audio second rather than per fragment because the fragment
  * count is not known until segmentation finishes, while the relationship D5
  * records — every audio second lies in ~10 windows and carries 1-3 fragments —
  * is what makes an audio-second seed usable before the first embed event.
  */
-export const MEASURED_EMBED_MS_PER_S = 55;
+export const MEASURED_EMBED_MS_PER_S = 75;
 
 /**
  * What the shipped speaker separation was MEASURED to do, in the numbers the
@@ -197,14 +205,22 @@ export const SPEAKER_SEPARATION_LIMITS = Object.freeze({
 /**
  * The measured-limits line the review step shows, verbatim (D5). It lives in
  * code so the dialog, the docs and the bench cannot drift into promising more
- * than the four recordings showed; Task 8 rewrites it if the full-chain bench
- * table differs.
+ * than the four recordings showed.
+ *
+ * REWRITTEN in Task 8 from the full-chain bench table, as D5 required if it
+ * differed — and it did. The old sentence limited its claim to "clean speech
+ * fed straight to the speaker step", which was true of the sweep's condition
+ * (`--direct`) but sold the shipped path short: `--full-chain`, which is what
+ * this dialog runs (WAV -> 44.1 kHz stereo -> HT-Demucs -> the Vocals stem ->
+ * the diarizer), reaches the SAME 4/4 counts, three runs in a row
+ * (`docs/bench/diarize-bench-baseline.json`). What the set still does not
+ * contain is unchanged, and is what the second clause names.
  */
 export function limitsSentence(): string {
   return (
     'On the four test recordings (three with two speakers, one with four) the count was right every time, ' +
-    'with clean speech fed straight to the speaker step; recordings with many short turns or heavy crosstalk ' +
-    'were not in that set. If the count looks wrong, set it here.'
+    'both from clean speech and through the voice separation this tool runs first; recordings with many ' +
+    'short turns or heavy crosstalk were not in that set. If the count looks wrong, set it here.'
   );
 }
 
@@ -213,11 +229,24 @@ export function limitsSentence(): string {
  * overall bar (D5).
  *
  * DERIVED at call time from the three measured seeds rather than written down
- * as 0.91 / 0.01 / 0.08: a literal would drift the moment any seed is
+ * as 0.89 / 0.01 / 0.10: a literal would drift the moment any seed is
  * re-measured, and these three numbers are the only thing that makes the bar
- * mean anything. Demucs' cost per audio second is `1000 / MEASURED_REALTIME_FACTOR`
- * (`stemService.ts`, 1.52 -> 658 ms), imported from the module that measured
- * it. On this machine the weights come out at 0.913 / 0.011 / 0.076.
+ * mean anything — which is exactly what happened in Task 8, when the two
+ * seeds above moved and this function's answer moved with them. Demucs' cost
+ * per audio second is `1000 / MEASURED_REALTIME_FACTOR` (`stemService.ts`,
+ * 1.52 -> 658 ms), imported from the module that measured it. On this machine
+ * the weights come out at 0.886 / 0.013 / 0.101.
+ *
+ * Why the Demucs term is still 1.52 when this branch's own bench timed the
+ * stem stage at 1.89-2.11x realtime over twelve idle rows (Task 8): that
+ * constant predates this feature and seeds the Separate Stems, Transcribe and
+ * Voice Changer estimates too, and the bench drives `stemHost.cjs` in-process
+ * rather than through the Electron utility process the app uses, so it is not
+ * a like-for-like re-measurement. 1.52 is the CONSERVATIVE end of both
+ * measurements (the app's own, `KNOWN_LIMITATIONS.md`: 1.52x CPU, 1.57x in the
+ * shipped host), so the bar and the estimate read long on an idle machine
+ * rather than short. Correcting it needs its own stem bench — the ledger
+ * carries it as a numbered follow-up.
  */
 export function stageWeights(): { separate: number; segment: number; embed: number } {
   const separateMsPerSecond = 1000 / STEM_REALTIME_FACTOR;

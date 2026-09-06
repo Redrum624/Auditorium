@@ -58,10 +58,11 @@ const TRACK_LIST = trackList(STEM_TRACK_LABELS);
 /**
  * D5 — the three stages' shares of one Separate Voice run, computed ONCE from
  * the three measured seeds (`stageWeights()`: Demucs' 1/1.52 s per audio
- * second, 8 ms of segmentation, 55 ms of embedding). Never written down as
- * 0.91 / 0.01 / 0.08 here: a literal copy would drift the first time one of
- * those seeds is re-measured, and the whole point of a weighted bar is that
- * its weights are the measured ones.
+ * second, 10 ms of segmentation, 75 ms of embedding). Never written down as
+ * 0.89 / 0.01 / 0.10 here: a literal copy would drift the first time one of
+ * those seeds is re-measured — which is exactly what Task 8's bench run did to
+ * the two diarization seeds, and this line needed no edit — and the whole
+ * point of a weighted bar is that its weights are the measured ones.
  */
 const STAGE_SHARES = stageWeights();
 
@@ -179,9 +180,10 @@ const CANCELLED_MESSAGE = 'Speaker separation was cancelled.';
  *   - A speaker COUNT is a guess. The auto policy is measured on four
  *     recordings (`SPEAKER_SEPARATION_LIMITS`) and the panel says so in the
  *     same breath as it offers the count for correction.
- *   - Landing N speakers builds N FULL-LENGTH documents — 317.5 MB each for a
- *     15-minute stereo source (D4) — so the panel prices the landing before it
- *     happens and refuses one that would not fit (`SPEAKER_LANDING_BUDGET_BYTES`).
+ *   - Landing N speakers builds N + 1 FULL-LENGTH documents — the N speakers
+ *     and the Backing, 317.5 MB each for a 15-minute stereo source (D4) — so
+ *     the panel prices the landing before it happens and refuses one that
+ *     would not fit (`SPEAKER_LANDING_BUDGET_BYTES`).
  *   - Re-counting is free (`reclusterDiarization` over the kept evidence) but
  *     only until the run is thrown away. Landing first and re-counting after
  *     would cost a second five-minute model pass.
@@ -490,8 +492,9 @@ export default function SeparateDialog({
       // the Land button carries `disabled={overBudget}` with exactly this
       // predicate, and React delivers no click to a disabled <button>. It is
       // one line of insurance against the edit that leaves the refusal in the
-      // panel text alone — which would build N full-length documents, 1.3 GB
-      // of them at the smallest count this can refuse, on the first click.
+      // panel text alone — which would build N + 1 full-length documents (the
+      // speakers and the Backing), just over 1.2 GB of them at the smallest
+      // count this can refuse, on the first click.
       if (landingBytes > SPEAKER_LANDING_BUDGET_BYTES) return;
       // D4 takes DOCUMENT samples, not the 16 kHz model positions.
       landSpeakers(output, segmentsToDocSamples(diarization, output.sampleRate, output.lengthSamples));
@@ -521,14 +524,14 @@ export default function SeparateDialog({
 
   // D5: the pre-run estimate sums stage 1 (Demucs, 1/1.52 x realtime) and the
   // WHOLE of stage 2 — which D1 defines as segmentation AND embedding, so both
-  // measured seeds belong in it. The embedding seed is 55 ms per audio second
-  // against segmentation's 8 (`diarizeService`), so an estimate carrying only
+  // measured seeds belong in it. The embedding seed is 75 ms per audio second
+  // against segmentation's 10 (`diarizeService`), so an estimate carrying only
   // the segmentation half would drop seven eighths of the stage and understate
-  // a 15-minute source by ~50 s against the 7 s it did include. Stage 3 —
+  // a 15-minute source by ~68 s against the 9 s it did include. Stage 3 —
   // clustering and assembly, in this renderer — is named rather than numbered
   // because it has no measured seed at all; the widest measured spread in the
-  // sum is the EMBEDDING's own (29-73 ms per audio second across the four
-  // spike recordings), which is why the sentence promises "a short pass"
+  // sum is the EMBEDDING's own (39.9-110.1 ms per audio second across the four
+  // full-chain bench rows), which is why the sentence promises "a short pass"
   // rather than a second number.
   const audioSeconds = doc ? length / doc.sampleRate : 0;
   const estimateSeconds =
@@ -539,7 +542,12 @@ export default function SeparateDialog({
   const speakerCount = review?.diarization.speakerCount ?? 0;
   const hasEvidence = (review?.evidence.embeddings.length ?? 0) > 0;
   const documentBytes = review ? speakerDocumentBytes(review.output) : 0;
-  const landingBytes = documentBytes * speakerCount;
+  // N + 1, not N: `landSpeakers` builds one document per speaker AND a
+  // full-length Backing of exactly the same size (`stemLanding.ts`), so a gate
+  // priced at N documents passed a landing that allocated half as much again
+  // at N = 2. What the panel quotes and what the gate refuses is now what the
+  // landing actually allocates.
+  const landingBytes = documentBytes * (speakerCount + 1);
   const overBudget = speakerCount >= 2 && landingBytes > SPEAKER_LANDING_BUDGET_BYTES;
   const totalSpeech = review ? review.diarization.speechSeconds.reduce((sum, s) => sum + s, 0) : 0;
   // The select must always show a value it actually offers: with no evidence
@@ -737,7 +745,7 @@ export default function SeparateDialog({
               >
                 {`Each speaker track is a full-length copy of the voice — ${formatBytes(
                   documentBytes
-                )}; ${speakerCount} of them need ${formatBytes(landingBytes)} of memory.`}
+                )}; ${speakerCount} of them plus the Backing need ${formatBytes(landingBytes)} of memory.`}
               </p>
             )}
 
@@ -753,7 +761,7 @@ export default function SeparateDialog({
 
             {overBudget && (
               <p data-testid="speaker-review-budget" className="text-xs text-[#e0a458]">
-                {`These ${speakerCount} speaker tracks would need ${formatBytes(
+                {`These ${speakerCount} speaker tracks and the Backing would need ${formatBytes(
                   landingBytes
                 )}; pick fewer speakers or trim the source.`}
               </p>

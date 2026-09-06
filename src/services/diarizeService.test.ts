@@ -29,6 +29,8 @@ import {
   WIRE_LOCAL_SPEAKERS,
   type DiarizeBackend,
 } from '../__mocks__/diarizeBackend';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { monoMix } from './transcribeService';
 import { resampleChannel } from '../dsp/resample';
 import { MEASURED_REALTIME_FACTOR } from './stemService';
@@ -219,10 +221,51 @@ describe('constants', () => {
   });
 
   it('carries the measured stage seeds by value', () => {
-    // D5: segmentation 8 ms per audio second (spike 5.5-8.6), embedding 55
-    // (spike 29-73). Re-tuning either is a new bench run, not an edit.
-    expect(MEASURED_SEGMENT_MS_PER_S).toBe(8);
-    expect(MEASURED_EMBED_MS_PER_S).toBe(55);
+    // Task 8's re-derivation from the SHIPPED models and the SHIPPED chain:
+    // segmentation 10 ms per audio second, embedding 75. The values they
+    // replaced (8 and 55) came from `spike-results.json`, whose embedding
+    // model was CAM++ — an embedder this feature does not ship.
+    expect(MEASURED_SEGMENT_MS_PER_S).toBe(10);
+    expect(MEASURED_EMBED_MS_PER_S).toBe(75);
+  });
+
+  it('derives both seeds from the committed bench baseline, so a re-tune needs a bench run', () => {
+    // The rule both docblocks state, executed rather than described: each seed
+    // is the MEDIAN of the four `--full-chain` rows of the committed baseline,
+    // rounded to the nearest whole millisecond. `--full-chain` is the shipped
+    // path (D1: Demucs, then the diarizer); `--direct` is the sweep's
+    // condition and measures a cheaper run.
+    //
+    // This is the guard the old seeds did not have: with 8 and 55 in place it
+    // fails, and it fails again the day someone edits a seed without
+    // re-running `scripts/diarize-bench.cjs`.
+    const baseline = JSON.parse(
+      readFileSync(join(__dirname, '..', '..', 'docs', 'bench', 'diarize-bench-baseline.json'), 'utf8')
+    ) as {
+      tables: { fullChain: { ran: boolean; rows: { msPerAudioSecond: { segment: number; embed: number } }[] } };
+    };
+    const rows = baseline.tables.fullChain.rows;
+    expect(baseline.tables.fullChain.ran).toBe(true);
+    expect(rows).toHaveLength(4);
+
+    const median = (values: number[]): number => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return (sorted[1] + sorted[2]) / 2;
+    };
+    const segments = rows.map((r) => r.msPerAudioSecond.segment);
+    const embeds = rows.map((r) => r.msPerAudioSecond.embed);
+    // The medians are NOT integers (9.95 and 75.35 as committed), so the
+    // rounding is doing real work and this is not an identity assertion.
+    expect(Number.isInteger(median(segments))).toBe(false);
+    expect(Number.isInteger(median(embeds))).toBe(false);
+    expect(Math.round(median(segments))).toBe(MEASURED_SEGMENT_MS_PER_S);
+    expect(Math.round(median(embeds))).toBe(MEASURED_EMBED_MS_PER_S);
+    // ...and the seeds they replaced are outside what this table measures:
+    // both old values sit below the median of their own column, which is the
+    // shape of the finding that forced the re-derivation (the estimate ran
+    // short). The bound is one step off each median, not the median itself.
+    expect(median(segments)).toBeGreaterThan(8);
+    expect(median(embeds)).toBeGreaterThan(55);
   });
 });
 
@@ -1153,19 +1196,28 @@ describe('stageWeights', () => {
     const w = stageWeights();
     expect(w.separate + w.segment + w.embed).toBeCloseTo(1, 12);
 
-    // Demucs 1000 / 1.52 = 658 ms per audio second, segmentation 8, embedding
-    // 55 — the plan's own numbers, retyped here so the weights are pinned
-    // against D5 rather than against the module's own arithmetic.
-    const total = 1000 / 1.52 + 8 + 55;
+    // Demucs 1000 / 1.52 = 658 ms per audio second, segmentation 10, embedding
+    // 75 — the measured numbers retyped here so the weights are pinned against
+    // the measurements rather than against the module's own arithmetic.
+    const total = 1000 / 1.52 + 10 + 75;
     expect(w.separate).toBeCloseTo(1000 / 1.52 / total, 12);
-    expect(w.segment).toBeCloseTo(8 / total, 12);
-    expect(w.embed).toBeCloseTo(55 / total, 12);
-    // ...and the stem service's factor is the one it is derived from.
+    expect(w.segment).toBeCloseTo(10 / total, 12);
+    expect(w.embed).toBeCloseTo(75 / total, 12);
+    // ...and the stem service's factor is the one it is derived from. Task 8
+    // measured the stem stage at 1.89-2.11x realtime over twelve idle bench
+    // rows and left this constant alone deliberately (it predates the feature,
+    // seeds three other dialogs, and 1.52 is the conservative end): the
+    // discrepancy is a ledger follow-up, not a silent retune.
     expect(MEASURED_REALTIME_FACTOR).toBe(1.52);
-    // The rounded shape D5 states, as a sanity rail on the arithmetic above.
-    expect(w.separate).toBeCloseTo(0.91, 2);
-    expect(w.segment).toBeCloseTo(0.01, 2);
-    expect(w.embed).toBeCloseTo(0.08, 2);
+    // The rounded shape, as a sanity rail on the arithmetic above.
+    expect(w.separate).toBeCloseTo(0.886, 3);
+    expect(w.segment).toBeCloseTo(0.013, 3);
+    expect(w.embed).toBeCloseTo(0.101, 3);
+    // The embedding stage is now nearly EIGHT times the segmentation stage's
+    // weight; under the seeds this replaced it was under seven, and the bar
+    // handed Demucs 91.3 % of itself.
+    expect(w.embed / w.segment).toBeCloseTo(7.5, 1);
+    expect(w.separate).toBeLessThan(0.9);
   });
 });
 
@@ -1222,8 +1274,27 @@ describe('measured limits', () => {
   it('states the measured limits in the words the dialog shows', () => {
     expect(limitsSentence()).toBe(
       'On the four test recordings (three with two speakers, one with four) the count was right every time, ' +
-        'with clean speech fed straight to the speaker step; recordings with many short turns or heavy crosstalk ' +
-        'were not in that set. If the count looks wrong, set it here.'
+        'both from clean speech and through the voice separation this tool runs first; recordings with many ' +
+        'short turns or heavy crosstalk were not in that set. If the count looks wrong, set it here.'
     );
+  });
+
+  it('claims the SHIPPED chain, because the bench measured the shipped chain', () => {
+    // D5 told Task 8 to rewrite this line if the full-chain table differed
+    // from the direct one, and it did not differ where it counts: both modes
+    // reach the file-name truth on all four recordings, so the sentence no
+    // longer restricts its claim to speech fed straight to the speaker step.
+    const baseline = JSON.parse(
+      readFileSync(join(__dirname, '..', '..', 'docs', 'bench', 'diarize-bench-baseline.json'), 'utf8')
+    ) as { tables: Record<'direct' | 'fullChain', { ran: boolean; counts: number[]; truth: number[] }> };
+    for (const mode of ['direct', 'fullChain'] as const) {
+      expect(baseline.tables[mode].ran).toBe(true);
+      expect(baseline.tables[mode].counts).toEqual(baseline.tables[mode].truth);
+      expect(baseline.tables[mode].counts).toEqual([2, 2, 2, 4]);
+    }
+    expect(limitsSentence()).toContain('through the voice separation this tool runs first');
+    expect(limitsSentence()).not.toContain('fed straight to the speaker step');
+    // The half that is still a limit stays a limit.
+    expect(limitsSentence()).toContain('many short turns or heavy crosstalk were not in that set');
   });
 });

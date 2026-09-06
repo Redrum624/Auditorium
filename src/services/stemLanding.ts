@@ -546,7 +546,11 @@ export function speakersSessionName(sourceName: string): string {
  * source's single channel would understate a mono landing by half.
  *
  * D4's worked example: a 15-minute 44.1 kHz stereo source gives 317,520,000 B
- * per speaker (317.5 MB), i.e. ~1.9 GB at N = 6.
+ * per document (317.5 MB). A landing is N + 1 of them — {@link landSpeakers}
+ * builds the Backing at the same full length as every speaker — so the price
+ * is ~1.9 GB of speaker tracks at N = 6 and ~2.2 GB in total. The N + 1 is the
+ * figure the dialog prices and gates on; counting only the speakers passed a
+ * landing half as large again as its own ceiling.
  */
 export function speakerDocumentBytes(output: StemSeparationOutput): number {
   const channels = output.channelCount === 1 ? 2 : output.channelCount;
@@ -554,10 +558,12 @@ export function speakerDocumentBytes(output: StemSeparationOutput): number {
 }
 
 /**
- * D4 — the ceiling the DIALOG refuses a landing above, in bytes: N speaker
- * documents whose combined {@link speakerDocumentBytes} exceeds this are not
- * landed, and the user is told the figure and asked to pick fewer speakers or
- * trim the source.
+ * D4 — the ceiling the DIALOG refuses a landing above, in bytes: a landing
+ * whose N speaker documents PLUS its Backing exceed this combined
+ * {@link speakerDocumentBytes} is not landed, and the user is told the figure
+ * and asked to pick fewer speakers or trim the source. The Backing counts
+ * because {@link landSpeakers} allocates it, full length, alongside the
+ * speakers — the gate prices what the landing builds, not a subset of it.
  *
  * The same order as the transcribe host's stated envelope. It is a gate on the
  * button, not a rule this module enforces: nothing here truncates a document,

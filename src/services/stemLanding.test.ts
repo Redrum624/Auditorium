@@ -1369,8 +1369,38 @@ describe('D4 the speaker landing’s memory budget', () => {
     expect(Math.round(bytes / 1e6)).toBe(318);
     expect(Math.round((6 * bytes) / 1e8) / 10).toBe(1.9);
     expect(6 * bytes).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
-    // …while three still fit, so the budget is a real boundary, not a floor.
+
+    // …and what a landing COSTS is N + 1 of them, because `landSpeakers`
+    // builds the Backing at the same full length (asserted below on the real
+    // landing, not asserted here from arithmetic alone). At N = 6 that is
+    // 2.2 GB, not 1.9; the boundary a 15-minute stereo source meets is N = 3,
+    // where four documents pass 1.2 GB — while N = 2, three documents at
+    // 952.6 MB, still fits. Priced at N alone, N = 3 would have looked like
+    // 952.6 MB and landed 1.27 GB.
+    expect(Math.round((7 * bytes) / 1e8) / 10).toBe(2.2);
+    expect(4 * bytes).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
     expect(3 * bytes).toBeLessThan(SPEAKER_LANDING_BUDGET_BYTES);
+  });
+
+  it('a landing is N + 1 documents, which is what the budget has to price', () => {
+    // The fact the dialog's gate rests on, pinned on the landing itself: three
+    // speaker span arrays produce FOUR documents. `SPEAKER_SPANS` is the
+    // module's two-speaker fixture, so this uses a three-speaker one to keep
+    // the count off the fixture's own identity.
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    const threeSpeakers = [
+      [{ startSample: 0, endSample: 1_000 }],
+      [{ startSample: 2_000, endSample: 3_000 }],
+      [{ startSample: 4_000, endSample: 5_000 }],
+    ];
+    const result = landSpeakers(output, threeSpeakers);
+    expect(result.documentIds).toHaveLength(threeSpeakers.length + 1);
+    // ...and every one of them is FULL LENGTH, which is why they all cost
+    // `speakerDocumentBytes` each — including the Backing, the last of them.
+    for (const id of result.documentIds) {
+      expect(docLength(docById(id))).toBe(FIXTURE_LENGTH);
+    }
   });
 
   it('SPEAKER_LANDING_BUDGET_BYTES is the D4 constant, and lands nothing on its own', () => {
