@@ -1383,18 +1383,29 @@ function syntheticSeparation(source: AudioDocument, length: number): StemSeparat
 }
 
 /**
- * D6 — frames in one synthetic turn, and not a taste value: it is the shortest
- * turn that survives the assembler's own two rules whole.
+ * D6 — frames in one synthetic turn, and not a taste value. It is NOT the
+ * shortest turn the assembler keeps whole: it is a length that clears both of
+ * the assembler's rules whichever of the two binds.
  *
- * A turn shorter than MIN_ON_S is dropped outright, and the silence between two
- * turns of ONE speaker must exceed MIN_OFF_S or the assembler merges them
- * across the other speaker's turn — which, in a strictly alternating timeline,
- * is the same duration. One turn therefore has to clear both, so the length is
- * their sum expressed in frames (`(0.5 + 0.3) s x 16000 / 270`, rounded up).
- * Derived rather than written down so it cannot drift if D3's constants ever
- * are re-measured.
+ * In a strictly alternating two-voice timeline a turn and the silence before
+ * that same voice's NEXT turn are the same duration, so one length has to
+ * satisfy both rules at once. `mergeAndFilterSpans16k` (`diarization.ts`)
+ * merges while `last.end + MIN_OFF_S x 16000 >= s.start`, so a turn has to
+ * EXCEED MIN_OFF_S or a voice's two turns merge across the other's; the
+ * surviving span then has to reach MIN_ON_S or it is dropped. The binding
+ * constraint is therefore the LARGER of the two, not their sum: on today's
+ * constants MIN_OFF_S alone decides it at 30 frames (8,000 / 270, plus one to
+ * exceed rather than meet the bound), and MIN_ON_S — 18 frames — is satisfied
+ * a fortiori.
+ *
+ * The SUM is used anyway, and deliberately: it is at least as large as either
+ * bound whatever the two constants become, so the fixture keeps its
+ * two-turns-then-one shape (the segment counts `separateSpeakersLand`'s tests
+ * pin) even if D3 re-measures one of them and the other starts to bind. The
+ * price is a turn about 1.6x the current minimum, which costs a synthetic
+ * fixture nothing. Derived rather than written down for the same reason.
  */
-const HOOK_TURN_FRAMES = Math.ceil(((MIN_OFF_S + MIN_ON_S) * MODEL_SAMPLE_RATE) / FRAME_SHIFT);
+export const HOOK_TURN_FRAMES = Math.ceil(((MIN_OFF_S + MIN_ON_S) * MODEL_SAMPLE_RATE) / FRAME_SHIFT);
 
 /** D6 — voices in the synthetic timeline: two, the smallest number for which
  * "separate the speakers" means anything. It is at most LOCAL_SPEAKERS by
@@ -1427,9 +1438,19 @@ const HOOK_VECTOR_SEED = 31;
  * import from `src/__mocks__`: this file ships in the renderer bundle.
  *
  * Frames past the end of the assembled range stay class 0 (silence) — a real
- * host's zero-padded tail window predicts nothing there either.
+ * host's zero-padded tail window predicts nothing there either. That cut is
+ * fixture FIDELITY, not a guard the assembly leans on: `assembleLabels` recomputes
+ * the same `assembledFrameCount` and stops voting at the same frame, so classes
+ * written past it would never be read. It is pinned on the evidence itself for
+ * that reason.
+ *
+ * EXPORTED for its own tests. All three fidelity rules here — slots by first
+ * appearance, the MIN_EMBED_FRAMES gate, the assembled cut — are invisible in
+ * `separateSpeakersLand`'s summary: every one of them lands the same session,
+ * so removing any of them would leave the landing tests green. The evidence is
+ * the only place they can be measured.
  */
-function syntheticSpeakerEvidence(lengthSamples: number, sampleRate: number): DiarizationEvidence {
+export function syntheticSpeakerEvidence(lengthSamples: number, sampleRate: number): DiarizationEvidence {
   const totalSamples16k = modelLength16k(lengthSamples, sampleRate);
   const windowCount = expectedWindowCount(totalSamples16k);
   const frameCount = assembledFrameCount(totalSamples16k, windowCount);

@@ -11,7 +11,12 @@
  * what an escaped `Int32Array`/`Float32Array` is).
  */
 
-import { installTestHooks, type TestApi } from './testHooks';
+import {
+  installTestHooks,
+  syntheticSpeakerEvidence,
+  HOOK_TURN_FRAMES,
+  type TestApi,
+} from './testHooks';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
@@ -38,7 +43,14 @@ import {
   FALLBACK_SESSION_LANE_WIDTH,
   _resetSessionLaneWidth,
 } from '../multitrack/sessionViewport';
-import { MIN_CLUSTER_SIZE, SEG_SHIFT, SEG_WINDOW } from '../dsp/diarization';
+import {
+  FRAME_SHIFT,
+  MIN_CLUSTER_SIZE,
+  MIN_EMBED_FRAMES,
+  SEG_FRAMES,
+  SEG_SHIFT,
+  SEG_WINDOW,
+} from '../dsp/diarization';
 import { cancelDiarization } from './diarizeService';
 import {
   classWindow,
@@ -1402,6 +1414,12 @@ describe('separateSpeakersLand (D4/D6)', () => {
     // `landVoice`'s own exact-sum verdict is a real one, not D4's "no claim".
     expect(summary.outsideSpansPeak).toBeNull();
     expect(summary.speakerPeaks).toEqual([]);
+    // The one field that DIFFERS between the two landings, so the count-of-two
+    // `toBeNull()` above is a contrast and not the seed value: `landVoice`
+    // reports the real peak-derived verdict (`createLandingDocuments`:
+    // `sourcePeak <= 1`), and the synthetic separation is an exact partition of
+    // a source that peaks near 0.45.
+    expect(summary.exactSumHolds).toBe(true);
   });
 
   it('every speaker document is silent outside that speakers turns and carries audio inside them', () => {
@@ -1482,6 +1500,108 @@ describe('separateSpeakersLand (D4/D6)', () => {
 });
 
 /**
+ * D6 — the three fidelity rules `syntheticSpeakerEvidence` builds its host
+ * output from, pinned on the EVIDENCE rather than on the landing.
+ *
+ * They have to be pinned here because none of them is visible downstream: slots
+ * handed out by first appearance, slots fixed per voice, and an emission that
+ * ignores the MIN_EMBED_FRAMES gate all land the same session with the same
+ * documents, so every assertion in `separateSpeakersLand`'s describe above
+ * stays green when one of the three is removed. What they protect is the claim
+ * the hook's docblock makes — that this is the evidence a real host WOULD have
+ * produced (D1/D2) — and a fixture that quietly stopped being that would take
+ * the smoke's speaker coverage with it.
+ */
+describe('syntheticSpeakerEvidence (D6 fixture fidelity)', () => {
+  /** Document samples at 44.1 kHz whose 16 kHz length assembles to exactly
+   *  `frames` frames in ONE zero-padded window: `assembledFrameCount` cuts a
+   *  padded run at `trunc(totalSamples16k / FRAME_SHIFT)`, so the shortest
+   *  16 kHz length reaching `frames` is `frames * FRAME_SHIFT`, and the exact
+   *  rate ratio 44100/16000 = 441/160 turns that into document samples. */
+  const docSamplesForFrames = (frames: number): number =>
+    Math.ceil((frames * FRAME_SHIFT * 441) / 160);
+
+  /** Document samples that resample to exactly `windows` segmentation windows,
+   *  as the two describes around this one compute them. */
+  const docSamplesForWindows = (windows: number): number =>
+    ((SEG_WINDOW + (windows - 1) * SEG_SHIFT) * 44100) / 16000;
+
+  /** The GLOBAL voice a fragment carries. `unitVector` puts a whole unit on
+   *  its axis and a ±0.01 wobble everywhere else, so the largest component is
+   *  the voice index the fixture built the vector for — which is what lets a
+   *  slot be read back to the voice that held it. */
+  function voiceOf(vector: Float32Array): number {
+    let best = 0;
+    for (let i = 1; i < vector.length; i++) if (vector[i] > vector[best]) best = i;
+    return best;
+  }
+
+  it('hands local slots out by first appearance, so one voice changes slot between windows', () => {
+    // Window 1 starts at global frame 59 (`windowStartFrame(1)`), which falls
+    // inside the SECOND voice's first turn (frames 48..95 at HOOK_TURN_FRAMES
+    // = 48). That voice therefore appears first in window 1 and takes slot 0 —
+    // the slot the FIRST voice held in window 0. A fixture with slots fixed
+    // per voice is what a real host never produces, and clustering across a
+    // swap is the whole reason the assembly needs vectors at all.
+    const evidence = syntheticSpeakerEvidence(docSamplesForWindows(2), 44100);
+    expect(evidence.windows).toHaveLength(2);
+    expect(HOOK_TURN_FRAMES).toBeLessThan(59);
+
+    const slotZero = (windowIndex: number): Float32Array => {
+      const e = evidence.embeddings.find((x) => x.windowIndex === windowIndex && x.localSpeaker === 0);
+      if (!e) throw new Error(`window ${windowIndex} emitted no slot-0 fragment`);
+      return e.vector;
+    };
+    expect(voiceOf(slotZero(0))).toBe(0);
+    expect(voiceOf(slotZero(1))).toBe(1);
+
+    // The class bytes say it too: frame 0 of BOTH windows is the singleton
+    // class of slot 0 (POWERSET index 1 = [0]), even though the two frames
+    // belong to different voices.
+    expect(evidence.windows[0][0]).toBe(1);
+    expect(evidence.windows[1][0]).toBe(1);
+  });
+
+  it('emits a fragment only once a voice holds MIN_EMBED_FRAMES of the window, and none below it', () => {
+    // D1's emission rule verbatim: at least 10 active frames. One padded
+    // window cut one frame BELOW the gate — the first voice holds a whole turn
+    // and the second holds the MIN_EMBED_FRAMES − 1 frames that are left, so
+    // the host would emit one fragment for that window and so does the fixture.
+    const below = syntheticSpeakerEvidence(
+      docSamplesForFrames(HOOK_TURN_FRAMES + MIN_EMBED_FRAMES - 1),
+      44100
+    );
+    expect(below.windows).toHaveLength(1);
+    expect(below.embeddings).toHaveLength(1);
+    expect(below.embeddings[0].localSpeaker).toBe(0);
+    expect(below.embeddings[0].activeFrames).toBe(HOOK_TURN_FRAMES);
+
+    // One frame of audio more and the second voice sits exactly ON the gate,
+    // which D1 keeps (`activeFrames < MIN_EMBED_FRAMES` is what it drops).
+    const atGate = syntheticSpeakerEvidence(
+      docSamplesForFrames(HOOK_TURN_FRAMES + MIN_EMBED_FRAMES),
+      44100
+    );
+    expect(atGate.embeddings).toHaveLength(2);
+    expect(atGate.embeddings[1].localSpeaker).toBe(1);
+    expect(atGate.embeddings[1].activeFrames).toBe(MIN_EMBED_FRAMES);
+    expect(voiceOf(atGate.embeddings[1].vector)).toBe(1);
+  });
+
+  it('leaves every frame past the assembled cut silent, as a zero-padded tail window would', () => {
+    const frames = HOOK_TURN_FRAMES + MIN_EMBED_FRAMES;
+    const evidence = syntheticSpeakerEvidence(docSamplesForFrames(frames), 44100);
+    const window = evidence.windows[0];
+
+    // The window is a FULL 589-byte one on the wire, whatever the audio ends:
+    // the padding is silence, not a short array.
+    expect(window).toHaveLength(SEG_FRAMES);
+    expect(window[frames - 1]).toBeGreaterThan(0);
+    expect(window.slice(frames)).toEqual(new Uint8Array(SEG_FRAMES - frames));
+  });
+});
+
+/**
  * D6 — the two hooks that face the REAL diarization host: the model probe the
  * smoke gates on, and the run itself.
  *
@@ -1539,6 +1659,14 @@ describe('getDiarizeModelState / diarizeActive (D6)', () => {
       { from: 200, to: 400, class: 2 },
       { from: 400, to: WIRE_WINDOW_FRAMES, class: 3 },
     ]);
+  }
+
+  /** One window with slots 0 and 1 active over EVERY frame: powerset class 4
+   *  is `[0, 1]` (D3's POWERSET), the two-slot class the host sends when two
+   *  voices talk at once — so `speakerCountPerFrame` reads 2 and the assembly
+   *  keeps both clusters active on the same frames. */
+  function crosstalkWindow(): Uint8Array {
+    return classWindow([{ from: 0, to: WIRE_WINDOW_FRAMES, class: 4 }]);
   }
 
   /** Voice A holds slot 0 in every window plus slot 2 of window 0 (four
@@ -1650,6 +1778,60 @@ describe('getDiarizeModelState / diarizeActive (D6)', () => {
     expect(summary.rawClusterCount).toBe(1);
     expect(summary.speakerCount).toBe(1);
     expectPlainJson(summary);
+  });
+
+  it('reports the assemblys overlap runs, which a two-slot window really produces', async () => {
+    const t = api();
+    // MIN_CLUSTER_SIZE windows -> MIN_CLUSTER_SIZE fragments per voice, the
+    // boundary the auto fold keeps (D3), and every frame of every window
+    // carries BOTH slots. The two voices are then active over the same span,
+    // which is exactly what `finalize`'s sweep line calls overlap.
+    addStemDoc('crosstalk.wav', docSamplesForWindows(MIN_CLUSTER_SIZE));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    for (let i = 0; i < MIN_CLUSTER_SIZE; i++) {
+      backend.emit.window({ index: i, labels: crosstalkWindow() });
+      [0, 1].forEach((local) => {
+        backend.emit.embedding({
+          windowIndex: i,
+          localSpeaker: local,
+          activeFrames: WIRE_WINDOW_FRAMES,
+          vector: speakerVector(local, 9000 + i * 31 + local),
+        });
+      });
+    }
+    backend.settle({ ok: true, windowCount: MIN_CLUSTER_SIZE });
+    const summary = await promise;
+
+    expect(summary.speakerCount).toBe(2);
+    expect(summary.segmentCount).toBe(2);
+    // The field the overlap-free fixture above pins at 0 — measured here
+    // against a timeline that really has an overlap run, so the two together
+    // say the hook reports the assembly rather than a constant.
+    expect(summary.overlapCount).toBe(1);
+    expectPlainJson(summary);
+  });
+
+  it('reports the elapsed wall clock of the run, not the seed zero', async () => {
+    const t = api();
+    addStemDoc('stem.wav', docSamplesForWindows(1));
+    // `Date.now` is the hook's only clock, and a real run here finishes inside
+    // one millisecond — so the elapsed figure would read 0, which is also the
+    // value the unwired seed carries. A monotonic stub makes it a measured
+    // DIFFERENCE: whatever the hook reports has to come from subtracting two
+    // clock reads it took itself.
+    let clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => (clock += 250));
+
+    const promise = t.diarizeActive();
+    await flushUntil(() => backend.isPending());
+    streamFixture(1);
+    const summary = await promise;
+
+    expect(summary.ok).toBe(true);
+    expect(Number.isFinite(summary.elapsedMs)).toBe(true);
+    expect(summary.elapsedMs).toBeGreaterThanOrEqual(250);
   });
 
   it('reports a missing model set without spawning anything', async () => {
