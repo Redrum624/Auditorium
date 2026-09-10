@@ -60,7 +60,7 @@ module.exports = {
     // reason the ignore pattern needed rewriting.
     //
     // `<rootDir>` is substituted as a LITERAL into a glob, and from a worktree
-    // that literal is `D:\Dev\...\.claude\worktrees\<id>\electron\**\*.test.cjs`.
+    // that literal is `C:\Dev\projects\...\.claude\worktrees\<id>\electron\**\*.test.cjs`.
     // `jest-util`'s path normaliser converts `\` to `/` EXCEPT before a
     // glob-special character, so the backslash in `\.claude` survives and
     // escapes the dot — the pattern then matches nothing and the project
