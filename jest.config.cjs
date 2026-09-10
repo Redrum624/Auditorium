@@ -8,7 +8,7 @@
  *
  * Written separator-agnostically and WITHOUT `<rootDir>`: Jest substitutes
  * `<rootDir>` as a literal into a string that is then compiled as a regex, and
- * on Windows that literal is `D:\Dev\...` — backslashes the regex engine reads
+ * on Windows that literal is `C:\Dev\...` — backslashes the regex engine reads
  * as escapes. Matching the path SEGMENT instead works on both platforms, and
  * `.claude` is unambiguous here: it is gitignored and appears nowhere else.
  *
