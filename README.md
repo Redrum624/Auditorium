@@ -85,9 +85,9 @@ Windows x64:
 ```bash
 git clone https://github.com/Redrum624/Auditorium.git
 cd auditorium
-npm install
-npm run dev          # Vite dev server + Electron
-npm run build:win    # -> release/: Auditorium Setup <version>.exe + Auditorium <version> portable.exe
+pnpm install
+pnpm dev             # Vite dev server + Electron
+pnpm build:win       # -> release/: Auditorium Setup <version>.exe + Auditorium <version> portable.exe
                      #    (+ README.txt and SHA256SUMS.txt covering all three)
 ```
 
@@ -243,11 +243,11 @@ alignLyricsService   // CTC forced alignment + the word-splice
 ## Development
 
 ```bash
-npm run dev          # dev server + Electron
-npm test             # jest — 3 projects, 6000+ tests
-npm run typecheck    # tsc --noEmit
-npm run smoke        # packaged end-to-end smoke (800+ assertions)
-npm run navigate     # packaged UI walker (50 surfaces)
+pnpm dev             # dev server + Electron
+pnpm test            # jest — 3 projects, 6000+ tests
+pnpm typecheck       # tsc --noEmit
+pnpm smoke           # packaged end-to-end smoke (800+ assertions)
+pnpm navigate        # packaged UI walker (50 surfaces)
 ```
 
 ## Documentation
@@ -262,8 +262,8 @@ npm run navigate     # packaged UI walker (50 surfaces)
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The short
-version: open an issue first, one logical change per PR, keep `npm test` and
-`npm run typecheck` green, and behavior changes carry tests that failed before
+version: open an issue first, one logical change per PR, keep `pnpm test` and
+`pnpm typecheck` green, and behavior changes carry tests that failed before
 the change.
 
 ## Credits

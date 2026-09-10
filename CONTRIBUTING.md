@@ -8,8 +8,8 @@ Thanks for your interest in Auditorium! Before a PR:
 3. Run the test suite — PRs must be green:
 
    ```bash
-   npm test              # full unit suite (3 jest projects)
-   npm run typecheck     # tsc --noEmit
+   pnpm test              # full unit suite (3 jest projects)
+   pnpm typecheck         # tsc --noEmit
    ```
 
 4. Behavior changes need tests that fail before the change and pass after.
