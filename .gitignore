@@ -13,3 +13,8 @@ test-output/
 src/__scratch__/
 
 public-repo/
+
+# Internal working docs (agent plans, specs, feedback notes, progress ledger) - never published
+docs/superpowers/
+docs/ui-feedback/
+PROGRESS.md
