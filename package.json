@@ -1,5 +1,5 @@
 {
-  "name": "audition_app",
+  "name": "auditorium",
   "productName": "Auditorium",
   "version": "1.39.0",
   "description": "Audition-class audio editor: waveform and spectral editing, undoable multitrack, 25 effects, and local AI vocal tools (stem separation, transcription, voice changer, lyric alignment).",
