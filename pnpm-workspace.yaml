@@ -1,9 +1,10 @@
 # Install a flat (npm-style) node_modules tree instead of pnpm's symlinked
-# virtual store. Required for packaging, not a preference: electron-builder's
-# file collectors walk node_modules assuming the flat npm/yarn layout, and a
-# pnpm symlinked store hides packages nested under node_modules\.pnpm from
-# that walk — onnxruntime-node's platform binaries would be silently dropped
-# from the packaged app. A hoisted tree is the flat layout electron-builder's
-# file collectors understand, the same choice
-# projects\wellness-companion\windows\pnpm-workspace.yaml:44-49 documents.
+# virtual store. This app is packaged with electron-builder, whose file
+# collectors can miss packages that live only under node_modules\.pnpm;
+# native packages that ship per-platform binaries (onnxruntime-node here) are
+# the ones at risk. A hoisted tree is the layout every collector understands.
+# Not yet confirmed by a packaged build of this app.
+#
+# (This lives here rather than in .npmrc because pnpm 11 no longer reads
+# node-linker from .npmrc.)
 nodeLinker: hoisted
