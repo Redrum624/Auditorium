@@ -8,3 +8,16 @@
 # (This lives here rather than in .npmrc because pnpm 11 no longer reads
 # node-linker from .npmrc.)
 nodeLinker: hoisted
+
+# pnpm 11 skips dependency install scripts unless they are allowed here, and
+# `pnpm install` fails when it skips any (ERR_PNPM_IGNORED_BUILDS). These are the
+# five packages pnpm reports for this lockfile, all allowed, so a fresh install
+# builds what an install on the development machine builds. `allowBuilds` is the
+# pnpm 11 key, a package-to-boolean map; the pnpm 10 `onlyBuiltDependencies`
+# list is ignored.
+allowBuilds:
+  '@parcel/watcher': true
+  electron-winstaller: true
+  esbuild: true
+  onnxruntime-node: true
+  unrs-resolver: true
